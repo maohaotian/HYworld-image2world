@@ -24,20 +24,38 @@ timer = Timer()
 LLM_ADDR = "localhost"
 MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 LLM_PORT = 8000
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
 
 
 def caption_single_video(args):
     """Caption one rendered video."""
-    render_path, llm_addr, llm_port, model_name = args
+    render_path, llm_addr, llm_port, model_name, llm_base_url = args
     output_path = render_path.replace('/render.mp4', '/traj_caption.json')
 
     try:
-        traj_caption = get_traj_caption(llm_addr, llm_port, model_name, render_path)
+        traj_caption = get_traj_caption(llm_addr, llm_port, model_name, render_path, llm_base_url=llm_base_url)
         with open(output_path, "w") as write:
             json.dump({"prompt": traj_caption}, write, indent=2)
         return render_path, True, None
     except Exception as e:
         return render_path, False, str(e)
+
+
+def env_flag(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def offline_caption():
+    return os.environ.get(
+        "HY_OFFLINE_TRAJ_CAPTION",
+        (
+            "A bright modern indoor laboratory workspace with glossy gray floor, "
+            "white walls, high industrial ceiling ducts, rectangular lights, large windows, "
+            "simple work tables, chairs, and sparse technical equipment. The camera moves "
+            "through the room while preserving a clean, orderly, realistic lab atmosphere "
+            "with stable geometry and consistent indoor lighting."
+        ),
+    )
 
 
 if __name__ == '__main__':
@@ -53,6 +71,10 @@ if __name__ == '__main__':
     parser.add_argument("--llm_addr", type=str, default=LLM_ADDR, help="vLLM server address")
     parser.add_argument("--llm_port", type=int, default=LLM_PORT, help="vLLM server port")
     parser.add_argument("--llm_name", type=str, default=MODEL_NAME, help="VLM model name served by vLLM")
+    parser.add_argument("--llm_base_url", type=str, default=LLM_BASE_URL,
+                        help="OpenAI-compatible base URL. If set, it overrides llm_addr/llm_port.")
+    parser.add_argument("--offline_vlm", action="store_true",
+                        help="Write deterministic local trajectory captions instead of calling the VLM.")
 
     args = parser.parse_args()
 
@@ -60,6 +82,7 @@ if __name__ == '__main__':
     LLM_ADDR = args.llm_addr
     LLM_PORT = args.llm_port
     MODEL_NAME = args.llm_name
+    offline_vlm = args.offline_vlm or env_flag("HY_OFFLINE_VLM")
 
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -138,9 +161,16 @@ if __name__ == '__main__':
             total_render_list = glob(f"{scene_path}/render_results/*/traj*/render.mp4")
             total_render_list = [path for path in total_render_list if not (path.split("/")[-3].startswith("reconstruct_") and path.split("/")[-2] == "traj1")]
 
-            if total_render_list:
+            if offline_vlm:
+                caption = offline_caption()
+                for render_path in total_render_list:
+                    output_path = render_path.replace('/render.mp4', '/traj_caption.json')
+                    with open(output_path, "w") as write:
+                        json.dump({"prompt": caption}, write, indent=2)
+                rank0_log(f"Wrote offline trajectory captions for {len(total_render_list)} rendered videos.")
+            elif total_render_list:
                 with timer.track("vllm Qwen3-VL trajectory caption (parallel)"):
-                    tasks = [(path, LLM_ADDR, LLM_PORT, MODEL_NAME) for path in total_render_list]
+                    tasks = [(path, LLM_ADDR, LLM_PORT, MODEL_NAME, args.llm_base_url) for path in total_render_list]
                     with ThreadPoolExecutor(max_workers=min(len(tasks), 32)) as executor:
                         futures = [executor.submit(caption_single_video, task) for task in tasks]
                         for future in tqdm(as_completed(futures), total=len(futures), desc="VLLM Captioning..."):

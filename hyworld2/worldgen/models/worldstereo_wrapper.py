@@ -122,6 +122,7 @@ class WorldStereo:
         repo_id: str,
         *,
         subfolder: str = "",
+        base_model: str | None = None,
         local_files_only: bool = False,
         sp_world_size: int = 1,
         fsdp: bool = False,
@@ -165,6 +166,8 @@ class WorldStereo:
             )
 
         cfg = OmegaConf.create(cls._load_hf_config(json_cfg_path))
+        if base_model:
+            cfg.base_model = base_model
         model_weights_path = safetensors_path
 
         model_type = subfolder

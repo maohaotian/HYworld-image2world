@@ -17,7 +17,6 @@ import trimesh
 import utils3d
 from PIL import Image
 from moge.model.v2 import MoGeModel
-from openai import OpenAI
 from scipy.spatial import cKDTree
 from tqdm import tqdm
 from transformers import Sam3Processor, Sam3Model
@@ -56,7 +55,7 @@ from src.panorama_utils import (
 )
 from src.pointcloud import point_rendering
 from src.seg_utils import get_zim_mask, build_gd_model, build_zim_model
-from src.vlm_utils import get_qwen_caption_format
+from src.vlm_utils import build_openai_client, get_qwen_caption_format
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 timer = Timer()
@@ -70,6 +69,7 @@ LLM_ADDR = "localhost"
 MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 
 LLM_PORT = 8000
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
 
 SAM_BATCH_SIZE = 4
 MAX_MASK_COUNT = 5
@@ -77,8 +77,15 @@ HF_CACHE_DIR = os.path.expanduser("~/.cache/huggingface/hub")
 ZIM_REPO_ID = "naver-iv/zim-anything-vitl"
 ZIM_SUBFOLDER = "zim_vit_l_2092"
 GD_REPO_ID = "IDEA-Research/grounding-dino-tiny"
-SAM3_REPO_ID = "facebook/sam3"
-MOGE_ID = "Ruicheng/moge-2-vitl-normal"
+SAM3_REPO_ID = os.environ.get("HY_SAM3_PATH", "facebook/sam3")
+MOGE_ID = os.environ.get("HY_MOGE_PATH", "Ruicheng/moge-2-vitl-normal")
+MOGE_MODEL_ID = MOGE_ID
+
+
+def resolve_moge_checkpoint(path):
+    if os.path.isdir(path):
+        return os.path.join(path, "model.pt")
+    return path
 
 
 def resolve_hf_checkpoint(repo_id, allow_patterns=None, subfolder=None, required_files=None):
@@ -135,6 +142,17 @@ def save_view_initial_data(args_tuple):
     return view_i
 
 
+def env_flag(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def fallback_objects_from_env():
+    objects = os.environ.get("HY_OFFLINE_OBJECTS", "")
+    if objects.strip():
+        return deduplicate_ordered([item.strip() for item in objects.split(",") if item.strip()])
+    return ["table", "chair", "window", "door", "machine", "computer"]
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
@@ -185,6 +203,10 @@ if __name__ == '__main__':
     parser.add_argument("--llm_addr", type=str, default=LLM_ADDR, help="vLLM server address")
     parser.add_argument("--llm_port", type=int, default=LLM_PORT, help="vLLM server port")
     parser.add_argument("--llm_name", type=str, default=MODEL_NAME, help="VLM model name served by vLLM")
+    parser.add_argument("--llm_base_url", type=str, default=LLM_BASE_URL,
+                        help="OpenAI-compatible base URL. If set, it overrides llm_addr/llm_port.")
+    parser.add_argument("--offline_vlm", action="store_true",
+                        help="Use local deterministic metadata/object fallbacks instead of calling the VLM.")
 
     args = parser.parse_args()
 
@@ -192,6 +214,7 @@ if __name__ == '__main__':
     LLM_ADDR = args.llm_addr
     LLM_PORT = args.llm_port
     MODEL_NAME = args.llm_name
+    offline_vlm = args.offline_vlm or env_flag("HY_OFFLINE_VLM")
 
     device = torch.device("cuda")
     set_seed(args.seed)
@@ -200,12 +223,12 @@ if __name__ == '__main__':
     zim_predictor = build_zim_model("vit_l", resolve_zim_checkpoint(), device=device)
     gd_processor, gd_model = build_gd_model(resolve_gd_checkpoint(), device=device)
 
-    depth_model = MoGeModel.from_pretrained(MOGE_ID).to(device).eval()
+    depth_model = MoGeModel.from_pretrained(resolve_moge_checkpoint(MOGE_MODEL_ID)).to(device).eval()
 
     # VLM & SAM3
-    client = OpenAI(api_key="EMPTY", base_url=f"http://{LLM_ADDR}:{LLM_PORT}/v1")
-    sam3_model = Sam3Model.from_pretrained("facebook/sam3").to(device)
-    sam3_processor = Sam3Processor.from_pretrained("facebook/sam3")
+    client = None if offline_vlm else build_openai_client(LLM_ADDR, LLM_PORT, args.llm_base_url)
+    sam3_model = Sam3Model.from_pretrained(SAM3_REPO_ID).to(device)
+    sam3_processor = Sam3Processor.from_pretrained(SAM3_REPO_ID)
     print("Models Initializing over.")
 
     # Near-view rotations used by regular trajectory generation.
@@ -253,6 +276,10 @@ if __name__ == '__main__':
         if os.path.exists(f"{scene_path}/meta_info.json"):
             with open(f"{scene_path}/meta_info.json", "r") as f:
                 meta_info = json.load(f)
+        elif offline_vlm:
+            meta_info = {"scene_type": os.environ.get("HY_OFFLINE_SCENE_TYPE", "indoor")}
+            with open(f"{scene_path}/meta_info.json", "w") as write:
+                json.dump(meta_info, write, indent=2)
         else:
             meta_info = {}
             base64_image = pil_image_to_base64(full_img)
@@ -669,7 +696,11 @@ if __name__ == '__main__':
             # VLM & SAM3
             segmentation_data = []
             unique_objects = []
-            if not (args.skip_exist and os.path.exists(os.path.join(scene_path, "objects.json"))):
+            if offline_vlm and not os.path.exists(os.path.join(scene_path, "objects.json")):
+                unique_objects = fallback_objects_from_env()
+                with open(os.path.join(scene_path, "objects.json"), "w") as f:
+                    json.dump(unique_objects, f, indent=4)
+            elif not (args.skip_exist and os.path.exists(os.path.join(scene_path, "objects.json"))):
                 try:
                     base64_image = pil_image_to_base64(full_img)
                     messages = [

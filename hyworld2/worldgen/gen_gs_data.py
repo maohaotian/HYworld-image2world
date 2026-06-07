@@ -20,6 +20,14 @@ from src.general_utils import rank0_log, Timer, load_video, save_16bit_png_depth
 from src.panorama_utils import split_panorama_image, split_panorama_depth, rotate_around_z_axis
 
 timer = Timer()
+MOGE_MODEL_ID = os.environ.get("HY_MOGE_PATH", "Ruicheng/moge-2-vitl-normal")
+
+
+def resolve_moge_checkpoint(path):
+    if os.path.isdir(path):
+        return os.path.join(path, "model.pt")
+    return path
+
 
 def save_io(fname, frame_img, depth_path, normal_map, w2c, K, output_path):
     img_path = f"{output_path}/images/{fname}.png"
@@ -95,7 +103,7 @@ if __name__ == '__main__':
 
     fov_x, fov_y = 120, 90
 
-    moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device)
+    moge_model = MoGeModel.from_pretrained(resolve_moge_checkpoint(MOGE_MODEL_ID)).to(device)
     moge_model.eval()
 
     if args.scene_name:

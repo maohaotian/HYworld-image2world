@@ -2,7 +2,9 @@ import collections
 import json
 import math
 import os
+import shutil
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from typing import Tuple, List
@@ -34,6 +36,41 @@ from .general_utils import (
     colorize_depth
 )
 from .pointcloud import depth2pcd
+
+MOGE_MODEL_ID = os.environ.get("HY_MOGE_PATH", "Ruicheng/moge-2-vitl-normal")
+SAM3_MODEL_ID = os.environ.get("HY_SAM3_PATH", "facebook/sam3")
+WORLDMIRROR_MODEL_ID = os.environ.get("HY_WORLDMIRROR_PATH", "tencent/HY-World-2.0")
+
+
+def resolve_torchrun_command():
+    torchrun_bin = os.environ.get("TORCHRUN_BIN") or shutil.which("torchrun")
+    if torchrun_bin:
+        return [torchrun_bin]
+    return [sys.executable, "-m", "torch.distributed.run"]
+
+
+def build_torchrun_subprocess_env():
+    env = os.environ.copy()
+    for key in (
+        "LOCAL_RANK",
+        "RANK",
+        "GROUP_RANK",
+        "ROLE_RANK",
+        "ROLE_NAME",
+        "WORLD_SIZE",
+        "LOCAL_WORLD_SIZE",
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_MAX_RESTARTS",
+    ):
+        env.pop(key, None)
+    return env
+
+
+def resolve_moge_checkpoint(path):
+    if os.path.isdir(path):
+        return os.path.join(path, "model.pt")
+    return path
 
 
 def statistical_outlier_removal(points, colors, nb_neighbors=20, std_ratio=2.0):
@@ -814,7 +851,7 @@ class PanoramaMemoryBank:
 
         rank0_log(f"Initializing Moge Model...")
         if moge_model is None:
-            self.moge_model = MoGeModel.from_pretrained("Ruicheng/moge-2-vitl-normal").to(device)
+            self.moge_model = MoGeModel.from_pretrained(resolve_moge_checkpoint(MOGE_MODEL_ID)).to(device)
         else:
             self.moge_model = moge_model
         self.moge_model.eval()
@@ -822,8 +859,8 @@ class PanoramaMemoryBank:
         rank0_log(f"Initializing SAM3 Model...")
         if sam3_model is None or sam3_processor is None:
             from transformers import Sam3VideoModel, Sam3VideoProcessor
-            self.sam3_model = Sam3VideoModel.from_pretrained("facebook/sam3").to(device, dtype=torch.bfloat16)
-            self.sam3_processor = Sam3VideoProcessor.from_pretrained("facebook/sam3")
+            self.sam3_model = Sam3VideoModel.from_pretrained(SAM3_MODEL_ID).to(device, dtype=torch.bfloat16)
+            self.sam3_processor = Sam3VideoProcessor.from_pretrained(SAM3_MODEL_ID)
         else:
             self.sam3_model = sam3_model
             self.sam3_processor = sam3_processor
@@ -1131,8 +1168,11 @@ class PanoramaMemoryBank:
         torch.cuda.empty_cache()
         if self.rank == 0:
             if not (skip_exist and os.path.exists(f"{self.world_mirror_dir}/name_map.json")):
+                world_mirror_master_port = os.environ.get("WORLD_MIRROR_MASTER_PORT", "29651")
                 wm_cmd = [
-                    "torchrun", f"--nproc_per_node={self.world_size}", "-m", "worldrecon.pipeline",
+                    *resolve_torchrun_command(), f"--nproc_per_node={self.world_size}", "--master_port", world_mirror_master_port,
+                    "-m", "worldrecon.pipeline",
+                    "--pretrained_model_name_or_path", WORLDMIRROR_MODEL_ID,
                     "--input_path", f"{self.world_mirror_dir}/images",
                     "--prior_cam_path", f"{self.world_mirror_dir}/cameras.json",
                     "--strict_output_path", f"{self.world_mirror_dir}/results",
@@ -1149,7 +1189,7 @@ class PanoramaMemoryBank:
                     "--disable_heads", "normal", "points", "gs"
                 ]
                 color_print(f"[Rank0] Running World Mirror inference: {' '.join(wm_cmd)}", "info")
-                result = subprocess.run(wm_cmd, cwd="..")
+                result = subprocess.run(wm_cmd, cwd="..", env=build_torchrun_subprocess_env())
 
                 if result.returncode != 0:
                     raise RuntimeError(f"World Mirror inference failed with return code {result.returncode}")

@@ -23,8 +23,15 @@ from src.sp_utils.parallel_states import initialize_parallel_state
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 timer = Timer()
 
-SAM3_REPO_ID = "facebook/sam3"
-MOGE_ID = "Ruicheng/moge-2-vitl-normal"
+SAM3_REPO_ID = os.environ.get("HY_SAM3_PATH", "facebook/sam3")
+MOGE_ID = os.environ.get("HY_MOGE_PATH", "Ruicheng/moge-2-vitl-normal")
+
+
+def resolve_moge_checkpoint(path):
+    if os.path.isdir(path):
+        return os.path.join(path, "model.pt")
+    return path
+
 
 if __name__ == '__main__':
     # == parse configs ==
@@ -39,6 +46,14 @@ if __name__ == '__main__':
     parser.add_argument("--pcd_nb_neighbors", default=10, type=int, help="pointcloud filtering number of neighbors")
     parser.add_argument("--pcd_std_ratio", default=2.0, type=float, help="pointcloud filtering std ratio")
     parser.add_argument("--local_files_only", action="store_true", help="If True, avoid downloading the file and return the path to the local cached file if it exists.")
+    parser.add_argument("--worldstereo_repo", default=os.environ.get("HY_WORLDSTEREO_PATH", "hanshanxue/WorldStereo"), type=str,
+                        help="WorldStereo HF repo ID or local checkpoint root.")
+    parser.add_argument("--worldstereo_base_model", default=os.environ.get("HY_WORLDSTEREO_BASE_MODEL", None), type=str,
+                        help="Optional local path or HF repo ID for the WorldStereo base video model.")
+    parser.add_argument("--moge_model", default=os.environ.get("HY_MOGE_PATH", MOGE_ID), type=str,
+                        help="MoGe HF repo ID or local checkpoint path.")
+    parser.add_argument("--sam3_model", default=os.environ.get("HY_SAM3_PATH", SAM3_REPO_ID), type=str,
+                        help="SAM3 HF repo ID or local checkpoint path.")
     parser.add_argument("--fsdp", action="store_true", help="Enable FSDP model sharding")
     parser.add_argument("--skip_exist", action="store_true", help="skip existing videos")
     parser.add_argument("--seed", default=1024, type=int, help="Random seed")
@@ -76,9 +91,9 @@ if __name__ == '__main__':
 
     # == setup models ==
     # Note: FP8 quantization is done INSIDE init_wan_from_cfg, BEFORE FSDP sharding
-    moge_model = MoGeModel.from_pretrained(MOGE_ID).to(device)
-    sam3_model = Sam3VideoModel.from_pretrained(SAM3_REPO_ID).to(device, dtype=torch.bfloat16)
-    sam3_processor = Sam3VideoProcessor.from_pretrained(SAM3_REPO_ID)
+    moge_model = MoGeModel.from_pretrained(resolve_moge_checkpoint(args.moge_model)).to(device)
+    sam3_model = Sam3VideoModel.from_pretrained(args.sam3_model).to(device, dtype=torch.bfloat16)
+    sam3_processor = Sam3VideoProcessor.from_pretrained(args.sam3_model)
     rank0_log("Model init over...")
 
     # reset it to the fp32 as we make diffusion scheduler in fp32
@@ -86,8 +101,9 @@ if __name__ == '__main__':
 
     # == Video Generation Inference ==
     worldstereo = WorldStereo.from_pretrained(
-        "hanshanxue/WorldStereo",
+        args.worldstereo_repo,
         subfolder=args.model_type,
+        base_model=args.worldstereo_base_model,
         local_files_only=args.local_files_only,
         sp_world_size=sp_size,
         fsdp=args.fsdp,

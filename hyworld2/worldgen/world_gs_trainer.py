@@ -613,6 +613,173 @@ def compute_camera_obb(
     ]
 
 
+def _rotation_matrix_from_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    source /= np.linalg.norm(source) + 1e-12
+    target /= np.linalg.norm(target) + 1e-12
+
+    dot = float(np.clip(np.dot(source, target), -1.0, 1.0))
+    if dot > 1.0 - 1e-8:
+        return np.eye(3, dtype=np.float64)
+
+    if dot < -1.0 + 1e-8:
+        axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        if abs(source[0]) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        axis -= source * np.dot(source, axis)
+        axis /= np.linalg.norm(axis) + 1e-12
+        return -np.eye(3, dtype=np.float64) + 2.0 * np.outer(axis, axis)
+
+    axis = np.cross(source, target)
+    axis_norm = np.linalg.norm(axis)
+    skew = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ], dtype=np.float64)
+    return np.eye(3, dtype=np.float64) + skew + (skew @ skew) * ((1.0 - dot) / (axis_norm ** 2))
+
+
+def _rotation_matrix_to_quat_xyzw(rotation: np.ndarray) -> np.ndarray:
+    rotation = np.asarray(rotation, dtype=np.float64)
+    trace = float(np.trace(rotation))
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        quat = np.array([
+            (rotation[2, 1] - rotation[1, 2]) / s,
+            (rotation[0, 2] - rotation[2, 0]) / s,
+            (rotation[1, 0] - rotation[0, 1]) / s,
+            0.25 * s,
+        ], dtype=np.float64)
+    else:
+        diag = np.diag(rotation)
+        idx = int(np.argmax(diag))
+        if idx == 0:
+            s = math.sqrt(1.0 + rotation[0, 0] - rotation[1, 1] - rotation[2, 2]) * 2.0
+            quat = np.array([
+                0.25 * s,
+                (rotation[0, 1] + rotation[1, 0]) / s,
+                (rotation[0, 2] + rotation[2, 0]) / s,
+                (rotation[2, 1] - rotation[1, 2]) / s,
+            ], dtype=np.float64)
+        elif idx == 1:
+            s = math.sqrt(1.0 + rotation[1, 1] - rotation[0, 0] - rotation[2, 2]) * 2.0
+            quat = np.array([
+                (rotation[0, 1] + rotation[1, 0]) / s,
+                0.25 * s,
+                (rotation[1, 2] + rotation[2, 1]) / s,
+                (rotation[0, 2] - rotation[2, 0]) / s,
+            ], dtype=np.float64)
+        else:
+            s = math.sqrt(1.0 + rotation[2, 2] - rotation[0, 0] - rotation[1, 1]) * 2.0
+            quat = np.array([
+                (rotation[0, 2] + rotation[2, 0]) / s,
+                (rotation[1, 2] + rotation[2, 1]) / s,
+                0.25 * s,
+                (rotation[1, 0] - rotation[0, 1]) / s,
+            ], dtype=np.float64)
+    quat /= np.linalg.norm(quat) + 1e-12
+    return quat.astype(np.float32)
+
+
+def _quat_xyzw_multiply(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+    lx, ly, lz, lw = np.moveaxis(lhs, -1, 0)
+    rx, ry, rz, rw = np.moveaxis(rhs, -1, 0)
+    out = np.stack([
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    ], axis=-1)
+    out /= np.linalg.norm(out, axis=-1, keepdims=True) + 1e-12
+    return out.astype(np.float32)
+
+
+def _rdf_vector_to_ruf(vector: np.ndarray) -> np.ndarray:
+    vector = np.asarray(vector, dtype=np.float64)
+    return np.array([vector[0], -vector[1], vector[2]], dtype=np.float64)
+
+
+def _rotate_spz_cloud(cloud, rotation: np.ndarray) -> None:
+    rotation = np.asarray(rotation, dtype=np.float32)
+    positions = np.asarray(cloud.positions, dtype=np.float32).reshape(-1, 3)
+    cloud.positions = (positions @ rotation.T).reshape(-1).astype(np.float32)
+
+    rotations = np.asarray(cloud.rotations, dtype=np.float32).reshape(-1, 4)
+    align_quat = np.broadcast_to(_rotation_matrix_to_quat_xyzw(rotation), rotations.shape)
+    cloud.rotations = _quat_xyzw_multiply(align_quat, rotations).reshape(-1).astype(np.float32)
+
+
+def _save_spz_cloud_to_matching_ply_schema(cloud, template_ply_path: str, output_path: str) -> None:
+    from plyfile import PlyData, PlyElement
+
+    plydata = PlyData.read(template_ply_path)
+    vertex = plydata["vertex"]
+    data = vertex.data.copy()
+    names = data.dtype.names or ()
+
+    positions = np.asarray(cloud.positions, dtype=np.float32).reshape(-1, 3)
+    rotations_xyzw = np.asarray(cloud.rotations, dtype=np.float32).reshape(-1, 4)
+    rotations_wxyz = np.stack(
+        [rotations_xyzw[:, 3], rotations_xyzw[:, 0], rotations_xyzw[:, 1], rotations_xyzw[:, 2]],
+        axis=-1,
+    )
+    scales = np.asarray(cloud.scales, dtype=np.float32).reshape(-1, 3)
+    colors = np.asarray(cloud.colors, dtype=np.float32).reshape(-1, 3)
+    alphas = np.asarray(cloud.alphas, dtype=np.float32)
+
+    for idx, name in enumerate(["x", "y", "z"]):
+        if name in names:
+            data[name] = positions[:, idx]
+    for idx, name in enumerate(["rot_0", "rot_1", "rot_2", "rot_3"]):
+        if name in names:
+            data[name] = rotations_wxyz[:, idx]
+    for idx, name in enumerate(["scale_0", "scale_1", "scale_2"]):
+        if name in names:
+            data[name] = scales[:, idx]
+    for idx, name in enumerate(["f_dc_0", "f_dc_1", "f_dc_2"]):
+        if name in names:
+            data[name] = colors[:, idx]
+    if "opacity" in names:
+        data["opacity"] = alphas
+
+    element = PlyElement.describe(data, "vertex")
+    PlyData(
+        [element],
+        text=plydata.text,
+        byte_order=plydata.byte_order,
+        comments=plydata.comments,
+        obj_info=plydata.obj_info,
+    ).write(output_path)
+
+
+def _save_unity_dx12_spz(
+        spz,
+        ply_path: str,
+        output_path: str,
+        up_direction_rdf: np.ndarray,
+        antialiased: bool,
+        ply_output_path: Optional[str] = None,
+) -> None:
+    unpack_options = spz.UnpackOptions()
+    unpack_options.to_coord = spz.CoordinateSystem.RUF
+    cloud = spz.load_splat_from_ply(ply_path, unpack_options)
+    cloud.antialiased = bool(antialiased)
+
+    source_up = _rdf_vector_to_ruf(up_direction_rdf)
+    align_rotation = _rotation_matrix_from_vectors(source_up, np.array([0.0, 1.0, 0.0]))
+    _rotate_spz_cloud(cloud, align_rotation)
+
+    pack_options = spz.PackOptions()
+    if hasattr(pack_options, "version"):
+        pack_options.version = 3
+    pack_options.from_coord = spz.CoordinateSystem.RUF
+    spz.save_spz(cloud, pack_options, output_path)
+
+    if ply_output_path is not None:
+        _save_spz_cloud_to_matching_ply_schema(cloud, ply_path, ply_output_path)
+
 class Runner:
     """Engine for training and testing."""
 
@@ -1601,10 +1768,11 @@ class Runner:
                     if cfg.convert_to_spz:
                         import spz
                         print("Converting to SPZ...")
+                        ply_path = f"{self.ply_dir}/point_cloud_{step}.ply"
                         unpack_options = spz.UnpackOptions()
                         unpack_options.to_coord = spz.CoordinateSystem.RUB
                         # Load the PLY file
-                        cloud = spz.load_splat_from_ply(f"{self.ply_dir}/point_cloud_{step}.ply", unpack_options)
+                        cloud = spz.load_splat_from_ply(ply_path, unpack_options)
                         if cfg.antialiased:
                             cloud.antialiased = True
                         # Save as compressed SPZ format
@@ -1614,6 +1782,17 @@ class Runner:
                             pack_options.version = 3
                         pack_options.from_coord = spz.CoordinateSystem.RDF  # from RDF to RUB
                         spz.save_spz(cloud, pack_options, f"{self.ply_dir}/point_cloud_{step}.spz")
+
+                        unity_export_dir = f"{cfg.result_dir}/unity_export"
+                        os.makedirs(unity_export_dir, exist_ok=True)
+                        _save_unity_dx12_spz(
+                            spz=spz,
+                            ply_path=ply_path,
+                            output_path=f"{unity_export_dir}/point_cloud_{step}_unity_dx12.spz",
+                            up_direction_rdf=np.array(self.parser.up_direction),
+                            antialiased=cfg.antialiased,
+                            ply_output_path=f"{unity_export_dir}/point_cloud_{step}_unity_dx12.ply",
+                        )
 
                     if cfg.convert_to_spx:
                         # convert to spx

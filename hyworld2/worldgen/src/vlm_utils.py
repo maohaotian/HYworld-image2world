@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import os
 
 import numpy as np
 from openai import OpenAI
@@ -8,6 +9,14 @@ from openai import OpenAI
 from .general_utils import load_video
 
 negative_prompt = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走，阳光，明亮"
+
+
+def build_openai_client(llm_addr=None, llm_port=None, llm_base_url=None):
+    base_url = llm_base_url or os.environ.get("LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    if not base_url:
+        base_url = f"http://{llm_addr}:{llm_port}/v1"
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY") or "EMPTY"
+    return OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
 
 
 def parse_selected_indices_and_reasons(text):
@@ -146,8 +155,8 @@ def get_qwen_caption_format(task_type, sampled_images=None, desc_str_insert=None
         raise NotImplementedError(f"task_type {task_type} not implemented")
 
 
-def get_traj_caption(LLM_ADDR, LLM_PORT, MODEL_NAME, traj_path, sample_count=8):
-    client = OpenAI(api_key="EMPTY", base_url=f"http://{LLM_ADDR}:{LLM_PORT}/v1")
+def get_traj_caption(LLM_ADDR, LLM_PORT, MODEL_NAME, traj_path, sample_count=8, llm_base_url=None):
+    client = build_openai_client(LLM_ADDR, LLM_PORT, llm_base_url)
     prompt_text = ("Please generate a descriptive caption for the provided video, focusing strictly on the visual content of the scene while ignoring rendering artifacts. "
                    "1. Initial Scene Description: Start by providing a detailed description of the first frame. Specifically analyze the landscape, the style and material of the huts/tents, "
                    "the campfire, the texture of the ground, and the distant mountain range. 2. Camera Movement & New Elements: Briefly describe the camera movement "
