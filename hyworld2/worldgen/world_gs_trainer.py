@@ -23,6 +23,7 @@ from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from nerfview import CameraState, RenderTabState, apply_float_colormap
+from PIL import Image
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
@@ -259,6 +260,10 @@ class Config:
     # Dynamic pruning, used only while saving.
     do_prune: bool = False
     prune_opacity_threshold: float = 0.01
+    # Unity camera trajectory export. Name examples: "view0/traj0", "reconstruct_0/traj0".
+    unity_camera_trajectory: Optional[str] = None
+    # Frame rate used when writing Unity camera trajectory timestamps.
+    unity_camera_fps: float = 30.0
 
     # mesh params
     export_mesh: bool = False
@@ -699,6 +704,282 @@ def _quat_xyzw_multiply(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
 def _rdf_vector_to_ruf(vector: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, dtype=np.float64)
     return np.array([vector[0], -vector[1], vector[2]], dtype=np.float64)
+
+
+def _rdf_camera_c2w_to_unity_transform(c2w_rdf: np.ndarray, align_rotation_ruf: np.ndarray) -> np.ndarray:
+    c2w_rdf = np.asarray(c2w_rdf, dtype=np.float64)
+    rdf_to_ruf = np.diag([1.0, -1.0, 1.0])
+
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = align_rotation_ruf @ rdf_to_ruf @ c2w_rdf[:3, :3] @ rdf_to_ruf
+    transform[:3, 3] = align_rotation_ruf @ rdf_to_ruf @ c2w_rdf[:3, 3]
+    return transform
+
+
+def _apply_world_transform_to_camera(c2w: np.ndarray, world_transform: Optional[np.ndarray]) -> np.ndarray:
+    if world_transform is None:
+        return c2w
+    transformed = np.asarray(world_transform, dtype=np.float64) @ np.asarray(c2w, dtype=np.float64)
+    scaling = np.linalg.norm(transformed[0, :3])
+    if scaling > 1e-12:
+        transformed[:3, :3] /= scaling
+    return transformed
+
+
+def _camera_fov_y_degrees(intrinsic: np.ndarray, height: Optional[float]) -> Optional[float]:
+    if height is None or intrinsic.shape[0] < 2 or intrinsic.shape[1] < 2:
+        return None
+    fy = float(intrinsic[1, 1])
+    if fy <= 0:
+        return None
+    return float(np.degrees(2.0 * np.arctan(float(height) / (2.0 * fy))))
+
+
+def _passes_unity_train_camera_filter(
+        name: str,
+        sorted_index: int,
+        test_every: int,
+        pano_only: bool = False,
+        video_only: bool = False,
+        video_prefix_filter: Optional[str] = None,
+        pano_azimuth_interval: int = 1,
+        polar_up_azimuth_interval: int = 1,
+        polar_up_extra_layers: bool = True,
+        polar_down_azimuth_interval: int = 1,
+) -> bool:
+    is_pano = name.startswith("panorama_") or name.startswith("polar_")
+    if is_pano and not Dataset._passes_interval_filter(
+            name,
+            pano_azimuth_interval,
+            polar_up_azimuth_interval,
+            polar_up_extra_layers,
+            polar_down_azimuth_interval,
+    ):
+        return False
+    if pano_only:
+        return is_pano
+    if video_only:
+        return (
+            not is_pano
+            and sorted_index % test_every != 0
+            and (video_prefix_filter is None or name.startswith(video_prefix_filter))
+        )
+    return sorted_index % test_every != 0 or is_pano
+
+
+def _round_float_list(values: np.ndarray, decimals: int = 7) -> List[float]:
+    return [round(float(v), decimals) for v in np.asarray(values).reshape(-1)]
+
+
+def _round_matrix(matrix: np.ndarray, decimals: int = 7) -> List[List[float]]:
+    return [[round(float(v), decimals) for v in row] for row in np.asarray(matrix)]
+
+
+def _select_default_unity_trajectory(trajectories: List[Dict], preferred_name: Optional[str]) -> Dict:
+    if preferred_name:
+        for trajectory in trajectories:
+            if trajectory["name"] == preferred_name:
+                return trajectory
+    return trajectories[0]
+
+
+def _build_unity_camera_frame(
+        name: str,
+        frame_idx: int,
+        w2c: np.ndarray,
+        intrinsic: np.ndarray,
+        height: Optional[float],
+        align_rotation: np.ndarray,
+        world_transform: Optional[np.ndarray],
+        frame_rate: float,
+) -> Dict:
+    c2w = _apply_world_transform_to_camera(np.linalg.inv(w2c), world_transform)
+    transform = _rdf_camera_c2w_to_unity_transform(c2w, align_rotation)
+    rotation = _rotation_matrix_to_quat_xyzw(transform[:3, :3])
+    fov_y = _camera_fov_y_degrees(intrinsic, height)
+
+    frame = {
+        "time": round(float(frame_idx) / frame_rate, 6),
+        "position": _round_float_list(transform[:3, 3]),
+        "rotation": _round_float_list(rotation),
+        "name": name,
+        "transform_matrix": _round_matrix(transform),
+    }
+    if fov_y is not None:
+        frame["fov_y"] = round(fov_y, 5)
+    return frame
+
+
+def _build_unity_training_camera_set(
+        gs_data_dir: Union[str, Path],
+        align_rotation: np.ndarray,
+        world_transform: Optional[np.ndarray],
+        frame_rate: float,
+        test_every: int,
+        pano_only: bool = False,
+        video_only: bool = False,
+        video_prefix_filter: Optional[str] = None,
+        pano_azimuth_interval: int = 1,
+        polar_up_azimuth_interval: int = 1,
+        polar_up_extra_layers: bool = True,
+        polar_down_azimuth_interval: int = 1,
+) -> Optional[Dict]:
+    gs_data_dir = Path(gs_data_dir)
+    cameras_path = gs_data_dir / "cameras.json"
+    images_dir = gs_data_dir / "images"
+    if not cameras_path.exists() or not images_dir.exists():
+        return None
+
+    with open(cameras_path, "r") as f:
+        camera_data = json.load(f)
+
+    image_names = sorted(path.stem for path in images_dir.glob("*.png"))
+    frames = []
+    for sorted_index, image_name in enumerate(image_names):
+        if image_name not in camera_data:
+            continue
+        if not _passes_unity_train_camera_filter(
+                image_name,
+                sorted_index,
+                test_every,
+                pano_only=pano_only,
+                video_only=video_only,
+                video_prefix_filter=video_prefix_filter,
+                pano_azimuth_interval=pano_azimuth_interval,
+                polar_up_azimuth_interval=polar_up_azimuth_interval,
+                polar_up_extra_layers=polar_up_extra_layers,
+                polar_down_azimuth_interval=polar_down_azimuth_interval,
+        ):
+            continue
+
+        camera_info = camera_data[image_name]
+        w2c = np.asarray(camera_info["extrinsic"], dtype=np.float64)
+        intrinsic = np.asarray(camera_info["intrinsic"], dtype=np.float64)
+        height = camera_info.get("height")
+        if height is None:
+            height = getattr(Image.open(images_dir / f"{image_name}.png"), "height", None)
+
+        frames.append(_build_unity_camera_frame(
+            name=image_name,
+            frame_idx=len(frames),
+            w2c=w2c,
+            intrinsic=intrinsic,
+            height=height,
+            align_rotation=align_rotation,
+            world_transform=world_transform,
+            frame_rate=frame_rate,
+        ))
+
+    if not frames:
+        return None
+    return {
+        "name": "training_views",
+        "frame_count": len(frames),
+        "frames": frames,
+    }
+
+
+def _save_unity_dx12_camera_trajectory(
+        scene_root: Union[str, Path],
+        output_path: str,
+        up_direction_rdf: np.ndarray,
+        world_transform: Optional[np.ndarray] = None,
+        fps: float = 30.0,
+        default_trajectory: Optional[str] = None,
+        training_camera_dir: Optional[Union[str, Path]] = None,
+        test_every: int = 32,
+        pano_only: bool = False,
+        video_only: bool = False,
+        video_prefix_filter: Optional[str] = None,
+        pano_azimuth_interval: int = 1,
+        polar_up_azimuth_interval: int = 1,
+        polar_up_extra_layers: bool = True,
+        polar_down_azimuth_interval: int = 1,
+) -> Optional[Dict[str, int]]:
+    scene_root = Path(scene_root)
+    render_root = scene_root / "render_results"
+    if not render_root.exists():
+        return None
+
+    source_up = _rdf_vector_to_ruf(up_direction_rdf)
+    align_rotation = _rotation_matrix_from_vectors(source_up, np.array([0.0, 1.0, 0.0]))
+    frame_rate = fps if fps > 0 else 30.0
+
+    training_views = None
+    if training_camera_dir is not None:
+        training_views = _build_unity_training_camera_set(
+            gs_data_dir=training_camera_dir,
+            align_rotation=align_rotation,
+            world_transform=world_transform,
+            frame_rate=frame_rate,
+            test_every=test_every,
+            pano_only=pano_only,
+            video_only=video_only,
+            video_prefix_filter=video_prefix_filter,
+            pano_azimuth_interval=pano_azimuth_interval,
+            polar_up_azimuth_interval=polar_up_azimuth_interval,
+            polar_up_extra_layers=polar_up_extra_layers,
+            polar_down_azimuth_interval=polar_down_azimuth_interval,
+        )
+
+    trajectories = []
+    for camera_path in sorted(render_root.rglob("camera.json")):
+        with open(camera_path, "r") as f:
+            camera_data = json.load(f)
+
+        extrinsics = np.asarray(camera_data.get("extrinsic", []), dtype=np.float64)
+        if extrinsics.ndim != 3 or extrinsics.shape[1:] != (4, 4) or len(extrinsics) == 0:
+            continue
+
+        intrinsics = np.asarray(camera_data.get("intrinsic", []), dtype=np.float64)
+        if intrinsics.ndim == 2:
+            intrinsics = np.broadcast_to(intrinsics, (len(extrinsics), 3, 3))
+        elif intrinsics.ndim != 3:
+            intrinsics = np.zeros((len(extrinsics), 3, 3), dtype=np.float64)
+
+        height = camera_data.get("height")
+        trajectory_name = str(camera_path.parent.relative_to(render_root))
+        frames = []
+        for frame_idx, w2c in enumerate(extrinsics):
+            intrinsic = intrinsics[min(frame_idx, len(intrinsics) - 1)]
+            frames.append(_build_unity_camera_frame(
+                name=f"{trajectory_name.replace('/', '_')}_{frame_idx:03d}",
+                frame_idx=frame_idx,
+                w2c=w2c,
+                intrinsic=intrinsic,
+                height=height,
+                align_rotation=align_rotation,
+                world_transform=world_transform,
+                frame_rate=frame_rate,
+            ))
+
+        trajectories.append({
+            "name": trajectory_name,
+            "frame_count": len(frames),
+            "frames": frames,
+        })
+
+    if not trajectories and training_views is None:
+        return None
+
+    selected = training_views or _select_default_unity_trajectory(trajectories, default_trajectory)
+    payload = {
+        "coordinate_system": "Unity DX12 RUF, +Y up, +Z forward",
+        "frame_rate": frame_rate,
+        "default_trajectory": selected["name"],
+        "frames": selected["frames"],
+        "trajectories": trajectories,
+    }
+    if training_views is not None:
+        payload["training_views"] = training_views
+
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    return {
+        "trajectory_count": len(trajectories),
+        "training_view_count": len(training_views["frames"]) if training_views is not None else 0,
+        "frame_count": len(selected["frames"]),
+    }
 
 
 def _rotate_spz_cloud(cloud, rotation: np.ndarray) -> None:
@@ -1793,6 +2074,30 @@ class Runner:
                             antialiased=cfg.antialiased,
                             ply_output_path=f"{unity_export_dir}/point_cloud_{step}_unity_dx12.ply",
                         )
+                        scene_root = Path(cfg.data_dir).parent if Path(cfg.data_dir).name == "gs_data" else Path(cfg.data_dir)
+                        camera_export = _save_unity_dx12_camera_trajectory(
+                            scene_root=scene_root,
+                            output_path=f"{unity_export_dir}/camera_trajectory_unity_dx12.json",
+                            up_direction_rdf=np.array(self.parser.up_direction),
+                            world_transform=np.array(self.parser.transform),
+                            fps=cfg.unity_camera_fps,
+                            default_trajectory=cfg.unity_camera_trajectory,
+                            training_camera_dir=cfg.data_dir,
+                            test_every=cfg.test_every,
+                            pano_only=cfg.pano_only,
+                            video_only=cfg.video_only,
+                            video_prefix_filter=cfg.video_prefix_filter,
+                            pano_azimuth_interval=cfg.pano_azimuth_interval,
+                            polar_up_azimuth_interval=cfg.polar_up_azimuth_interval,
+                            polar_up_extra_layers=cfg.polar_up_extra_layers,
+                            polar_down_azimuth_interval=cfg.polar_down_azimuth_interval,
+                        )
+                        if camera_export is not None:
+                            print(
+                                "Exported Unity DX12 camera trajectory "
+                                f"with {camera_export['trajectory_count']} trajectories "
+                                f"to {unity_export_dir}/camera_trajectory_unity_dx12.json"
+                            )
 
                     if cfg.convert_to_spx:
                         # convert to spx
