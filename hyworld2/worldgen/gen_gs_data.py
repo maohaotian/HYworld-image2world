@@ -314,7 +314,11 @@ if __name__ == '__main__':
                         fname, extrinsic, intrinsic = fut.result()
                         save_cameras[fname] = {
                             "extrinsic": extrinsic,
-                            "intrinsic": intrinsic
+                            "intrinsic": intrinsic,
+                            "source_type": "trajectory",
+                            "view_id": view_id,
+                            "traj_id": traj_id,
+                            "frame_idx": int(fname.rsplit("_", 1)[-1]),
                         }
         rank0_log(f"Saving video frames over..., width: {img_width}, height: {img_height}")
 

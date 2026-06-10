@@ -962,7 +962,15 @@ def _save_unity_dx12_camera_trajectory(
     if not trajectories and training_views is None:
         return None
 
-    selected = training_views or _select_default_unity_trajectory(trajectories, default_trajectory)
+    # Keep the interactive startup view on a real rendered camera path by default.
+    # The dense training set often starts with panorama/polar views, which are
+    # useful for inspection but poor as an initial Unity user viewpoint.
+    if default_trajectory == "training_views" and training_views is not None:
+        selected = training_views
+    elif trajectories:
+        selected = _select_default_unity_trajectory(trajectories, default_trajectory)
+    else:
+        selected = training_views
     payload = {
         "coordinate_system": "Unity DX12 RUF, +Y up, +Z forward",
         "frame_rate": frame_rate,
@@ -980,6 +988,42 @@ def _save_unity_dx12_camera_trajectory(
         "training_view_count": len(training_views["frames"]) if training_views is not None else 0,
         "frame_count": len(selected["frames"]),
     }
+
+
+def _sanitize_unity_asset_stem(stem: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem.strip())
+    safe = "_".join(part for part in safe.split("_") if part)
+    return safe or "scene"
+
+
+def _infer_unity_asset_stem(scene_root: Path) -> str:
+    input_meta_path = scene_root / "input" / "input_meta.json"
+    if input_meta_path.exists():
+        try:
+            with open(input_meta_path, "r") as f:
+                source_image = json.load(f).get("source_image")
+            if source_image:
+                return _sanitize_unity_asset_stem(Path(source_image).stem)
+        except Exception:
+            pass
+
+    run_summary_path = scene_root / "run_summary.txt"
+    if run_summary_path.exists():
+        try:
+            for line in run_summary_path.read_text().splitlines():
+                if line.startswith("input_image="):
+                    return _sanitize_unity_asset_stem(Path(line.split("=", 1)[1]).stem)
+        except Exception:
+            pass
+
+    case_name = scene_root.name
+    if "_image_to_gs_" in case_name:
+        case_name = case_name.split("_image_to_gs_", 1)[0]
+    return _sanitize_unity_asset_stem(case_name)
+
+
+def _unity_export_basename(scene_root: Path, step: int) -> str:
+    return f"{_infer_unity_asset_stem(scene_root)}_{step}_unity_dx12"
 
 
 def _rotate_spz_cloud(cloud, rotation: np.ndarray) -> None:
@@ -2066,18 +2110,23 @@ class Runner:
 
                         unity_export_dir = f"{cfg.result_dir}/unity_export"
                         os.makedirs(unity_export_dir, exist_ok=True)
+                        data_dir_path = Path(cfg.data_dir)
+                        scene_root = data_dir_path.parent if data_dir_path.name.startswith("gs_data") else data_dir_path
+                        unity_export_basename = _unity_export_basename(scene_root, step)
+                        unity_spz_path = f"{unity_export_dir}/{unity_export_basename}.spz"
+                        unity_ply_path = f"{unity_export_dir}/{unity_export_basename}.ply"
+                        unity_camera_path = f"{unity_export_dir}/{unity_export_basename}.json"
                         _save_unity_dx12_spz(
                             spz=spz,
                             ply_path=ply_path,
-                            output_path=f"{unity_export_dir}/point_cloud_{step}_unity_dx12.spz",
+                            output_path=unity_spz_path,
                             up_direction_rdf=np.array(self.parser.up_direction),
                             antialiased=cfg.antialiased,
-                            ply_output_path=f"{unity_export_dir}/point_cloud_{step}_unity_dx12.ply",
+                            ply_output_path=unity_ply_path,
                         )
-                        scene_root = Path(cfg.data_dir).parent if Path(cfg.data_dir).name == "gs_data" else Path(cfg.data_dir)
                         camera_export = _save_unity_dx12_camera_trajectory(
                             scene_root=scene_root,
-                            output_path=f"{unity_export_dir}/camera_trajectory_unity_dx12.json",
+                            output_path=unity_camera_path,
                             up_direction_rdf=np.array(self.parser.up_direction),
                             world_transform=np.array(self.parser.transform),
                             fps=cfg.unity_camera_fps,
@@ -2096,7 +2145,7 @@ class Runner:
                             print(
                                 "Exported Unity DX12 camera trajectory "
                                 f"with {camera_export['trajectory_count']} trajectories "
-                                f"to {unity_export_dir}/camera_trajectory_unity_dx12.json"
+                                f"to {unity_camera_path}"
                             )
 
                     if cfg.convert_to_spx:
