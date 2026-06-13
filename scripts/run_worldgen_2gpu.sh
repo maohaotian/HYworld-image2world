@@ -34,6 +34,7 @@ WORLD_MIRROR_MASTER_PORT="${WORLD_MIRROR_MASTER_PORT:-29651}"
 export WORLD_MIRROR_MASTER_PORT
 
 GS_STEPS_SCALER="${GS_STEPS_SCALER:-1}"
+GS_SH_DEGREE="${GS_SH_DEGREE:-0}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -99,6 +100,7 @@ if run_stage 5; then
   "$PYTHON_BIN" -m world_gs_trainer default \
     --data_dir "$TARGET_PATH/gs_data" --result_dir "$RESULT_DIR" \
     --steps_scaler "$GS_STEPS_SCALER" \
+    --sh_degree "$GS_SH_DEGREE" \
     --save_ply --convert_to_spz --disable_video \
     --use_scale_regularization --antialiased \
     --depth_loss --normal_loss --sky_depth_from_pcd \
