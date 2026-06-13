@@ -132,7 +132,7 @@ if run_stage 5; then
     "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
     "${GS_MASK_GAUSSIAN_ARGS[@]}" \
     --use_anchor_protection --export_mesh \
-    --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
+    --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2400 \
     --strategy.refine-every 100 --strategy.refine-scale2d-stop-iter 2000 \
     --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 \
     --strategy.prune-scale3d 0.1
