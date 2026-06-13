@@ -36,6 +36,8 @@ Panorama generation:
 
 Worldgen:
   STAGES                   Forwarded to scripts/run_worldgen_2gpu.sh. Default: all
+  GS_STEPS_SCALER          Scales training duration only.
+                           Use 2 to double the baseline run while keeping densify cadence fixed.
   LLM_BASE_URL/LLM_NAME    Forwarded to VLM stages.
   CUDA_VISIBLE_DEVICES     Default inherited by run_worldgen_2gpu.sh.
 EOF

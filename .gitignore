@@ -10,6 +10,7 @@ checkpoints/
 .env
 .env.*
 !.env.example
+.agents/
 skyseg.onnx
 *.safetensors
 *.ckpt

@@ -84,9 +84,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node 8 video_gen.py \
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node 8 gen_gs_data.py \
     --root_path $TARGET_PATH --save_normal --split_sky
 
-# Stage 5: 3DGS Training (x8 GPUs)
-# Note: If using fewer GPUs, increase max_steps and strategy steps proportionally:
-# x4 GPUs: max_steps 2000; x2 GPUs: max_steps 4000; x1 GPU: max_steps 8000
+# Stage 5: 3DGS Training (x8 GPUs, quick smoke settings)
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m world_gs_trainer default \
     --data_dir $TARGET_PATH/gs_data --result_dir $RESULT_DIR \
     --max_steps 1500 --save_steps 1500 --eval_steps 1500 --ply_steps 1500 \
@@ -98,6 +96,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python -m world_gs_trainer default \
     --strategy.refine-start-iter 150 --strategy.refine-stop-iter 750 \
     --strategy.refine-every 100 --strategy.refine-scale2d-stop-iter 750 \
     --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 --strategy.prune-scale3d 0.1
+
+TARGET_PATH=$TARGET_PATH GS_STEPS_SCALER=2 STAGES=5 bash ../../scripts/run_worldgen_2gpu.sh
+
+# Internal check on the 2-GPU outdoor_image_to_gs run:
+# 10k steps was slightly better than 8k (PSNR 19.197 vs 19.136, SSIM 0.5503 vs 0.5488,
+# LPIPS 0.3535 vs 0.3551), so extra training can still help, but the gain is small near 8k.
 
 # Viewer: visualize the trained 3DGS
 python show_gs.py --port 8081 --gpu_id 0 --ckpt "$RESULT_DIR/ckpts/ckpt_1499_rank*.pt"

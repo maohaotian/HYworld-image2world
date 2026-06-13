@@ -33,6 +33,8 @@ MASTER_PORT_STAGE4="${MASTER_PORT_STAGE4:-29641}"
 WORLD_MIRROR_MASTER_PORT="${WORLD_MIRROR_MASTER_PORT:-29651}"
 export WORLD_MIRROR_MASTER_PORT
 
+GS_STEPS_SCALER="${GS_STEPS_SCALER:-1}"
+
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
 WORLDMIRROR_MODEL="${WORLDMIRROR_MODEL:-$CHECKPOINT_DIR/HY-World-2.0}"
@@ -96,7 +98,7 @@ if run_stage 5; then
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" \
   "$PYTHON_BIN" -m world_gs_trainer default \
     --data_dir "$TARGET_PATH/gs_data" --result_dir "$RESULT_DIR" \
-    --max_steps 4000 --save_steps 4000 --eval_steps 4000 --ply_steps 4000 \
+    --steps_scaler "$GS_STEPS_SCALER" \
     --save_ply --convert_to_spz --disable_video \
     --use_scale_regularization --antialiased \
     --depth_loss --normal_loss --sky_depth_from_pcd \
@@ -104,5 +106,6 @@ if run_stage 5; then
     --no-mask-export-anchor-protection --use_anchor_protection --export_mesh \
     --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
     --strategy.refine-every 200 --strategy.refine-scale2d-stop-iter 2000 \
-    --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 --strategy.prune-scale3d 0.1
+    --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 \
+    --strategy.prune-scale3d 0.1
 fi
