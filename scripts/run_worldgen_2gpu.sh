@@ -41,6 +41,7 @@ GS_DEPTH_LAMBDA1="${GS_DEPTH_LAMBDA1:-0.1}"
 GS_LPIPS_LAMBDA1="${GS_LPIPS_LAMBDA1:-0.0}"
 GS_USE_MASK_GAUSSIAN="${GS_USE_MASK_GAUSSIAN:-0}"
 GS_USE_SCALE_REGULARIZATION="${GS_USE_SCALE_REGULARIZATION:-0}"
+GS_MEANS_LR="${GS_MEANS_LR:-3.2e-4}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -123,6 +124,7 @@ if run_stage 5; then
     --steps_scaler "$GS_STEPS_SCALER" \
     --sh_degree "$GS_SH_DEGREE" \
     --downsample_pts_num "$GS_DOWNSAMPLE_PTS_NUM" \
+    --means_lr "$GS_MEANS_LR" \
     --save_ply --convert_to_spz --disable_video \
     "${GS_SCALE_REGULARIZATION_ARGS[@]}" --antialiased \
     --depth_loss --depth_lambda1 "$GS_DEPTH_LAMBDA1" \
