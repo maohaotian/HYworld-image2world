@@ -35,7 +35,6 @@ export WORLD_MIRROR_MASTER_PORT
 
 GS_STEPS_SCALER="${GS_STEPS_SCALER:-1}"
 GS_SH_DEGREE="${GS_SH_DEGREE:-0}"
-GS_ANTIALIASED="${GS_ANTIALIASED:-1}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -97,24 +96,18 @@ if run_stage 4; then
 fi
 
 if run_stage 5; then
-  GS_STAGE5_ARGS=(
-    --save_ply --convert_to_spz --disable_video
-    --use_scale_regularization
-    --depth_loss --normal_loss --sky_depth_from_pcd
-    --use_mask_gaussian --mask_export_stochastic
-    --no-mask-export-anchor-protection --use_anchor_protection --export_mesh
-    --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000
-    --strategy.refine-every 200 --strategy.refine-scale2d-stop-iter 2000
-    --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001
-    --strategy.prune-scale3d 0.1
-  )
-  if [[ "${GS_ANTIALIASED,,}" =~ ^(1|true|yes|on)$ ]]; then
-    GS_STAGE5_ARGS+=(--antialiased)
-  fi
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" \
   "$PYTHON_BIN" -m world_gs_trainer default \
     --data_dir "$TARGET_PATH/gs_data" --result_dir "$RESULT_DIR" \
     --steps_scaler "$GS_STEPS_SCALER" \
     --sh_degree "$GS_SH_DEGREE" \
-    "${GS_STAGE5_ARGS[@]}"
+    --save_ply --convert_to_spz --disable_video \
+    --use_scale_regularization --antialiased \
+    --depth_loss --normal_loss --sky_depth_from_pcd \
+    --use_mask_gaussian --mask_export_stochastic \
+    --no-mask-export-anchor-protection --use_anchor_protection --export_mesh \
+    --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
+    --strategy.refine-every 200 --strategy.refine-scale2d-stop-iter 2000 \
+    --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 \
+    --strategy.prune-scale3d 0.1
 fi
