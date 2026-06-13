@@ -39,6 +39,7 @@ GS_DOWNSAMPLE_PTS_NUM="${GS_DOWNSAMPLE_PTS_NUM:-2000000}"
 GS_NORMAL_LOSS="${GS_NORMAL_LOSS:-0}"
 GS_DEPTH_LAMBDA1="${GS_DEPTH_LAMBDA1:-0.1}"
 GS_LPIPS_LAMBDA1="${GS_LPIPS_LAMBDA1:-0.0}"
+GS_USE_MASK_GAUSSIAN="${GS_USE_MASK_GAUSSIAN:-0}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -62,6 +63,11 @@ fi
 GS_NORMAL_LOSS_ARGS=()
 if [[ "${GS_NORMAL_LOSS,,}" =~ ^(1|true|yes|on)$ ]]; then
   GS_NORMAL_LOSS_ARGS+=(--normal_loss)
+fi
+
+GS_MASK_GAUSSIAN_ARGS=()
+if [[ "${GS_USE_MASK_GAUSSIAN,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_MASK_GAUSSIAN_ARGS+=(--use_mask_gaussian --mask_export_stochastic --no-mask-export-anchor-protection)
 fi
 
 run_stage() {
@@ -116,8 +122,8 @@ if run_stage 5; then
     --depth_loss --depth_lambda1 "$GS_DEPTH_LAMBDA1" \
     --lpips_lambda1 "$GS_LPIPS_LAMBDA1" \
     "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
-    --use_mask_gaussian --mask_export_stochastic \
-    --no-mask-export-anchor-protection --use_anchor_protection --export_mesh \
+    "${GS_MASK_GAUSSIAN_ARGS[@]}" \
+    --use_anchor_protection --export_mesh \
     --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
     --strategy.refine-every 200 --strategy.refine-scale2d-stop-iter 2000 \
     --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 \
