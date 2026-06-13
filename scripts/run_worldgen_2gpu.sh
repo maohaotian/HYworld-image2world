@@ -40,6 +40,7 @@ GS_NORMAL_LOSS="${GS_NORMAL_LOSS:-0}"
 GS_DEPTH_LAMBDA1="${GS_DEPTH_LAMBDA1:-0.1}"
 GS_LPIPS_LAMBDA1="${GS_LPIPS_LAMBDA1:-0.0}"
 GS_USE_MASK_GAUSSIAN="${GS_USE_MASK_GAUSSIAN:-0}"
+GS_USE_SCALE_REGULARIZATION="${GS_USE_SCALE_REGULARIZATION:-0}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -68,6 +69,11 @@ fi
 GS_MASK_GAUSSIAN_ARGS=()
 if [[ "${GS_USE_MASK_GAUSSIAN,,}" =~ ^(1|true|yes|on)$ ]]; then
   GS_MASK_GAUSSIAN_ARGS+=(--use_mask_gaussian --mask_export_stochastic --no-mask-export-anchor-protection)
+fi
+
+GS_SCALE_REGULARIZATION_ARGS=()
+if [[ "${GS_USE_SCALE_REGULARIZATION,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_SCALE_REGULARIZATION_ARGS+=(--use_scale_regularization)
 fi
 
 run_stage() {
@@ -118,7 +124,7 @@ if run_stage 5; then
     --sh_degree "$GS_SH_DEGREE" \
     --downsample_pts_num "$GS_DOWNSAMPLE_PTS_NUM" \
     --save_ply --convert_to_spz --disable_video \
-    --use_scale_regularization --antialiased \
+    "${GS_SCALE_REGULARIZATION_ARGS[@]}" --antialiased \
     --depth_loss --depth_lambda1 "$GS_DEPTH_LAMBDA1" \
     --lpips_lambda1 "$GS_LPIPS_LAMBDA1" \
     "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
