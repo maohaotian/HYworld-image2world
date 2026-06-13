@@ -36,6 +36,7 @@ export WORLD_MIRROR_MASTER_PORT
 GS_STEPS_SCALER="${GS_STEPS_SCALER:-1}"
 GS_SH_DEGREE="${GS_SH_DEGREE:-0}"
 GS_DOWNSAMPLE_PTS_NUM="${GS_DOWNSAMPLE_PTS_NUM:-2000000}"
+GS_NORMAL_LOSS="${GS_NORMAL_LOSS:-0}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -54,6 +55,11 @@ cd "$ROOT_DIR/hyworld2/worldgen"
 OFFLINE_VLM_ARGS=()
 if [[ "${HY_OFFLINE_VLM,,}" =~ ^(1|true|yes|on)$ ]]; then
   OFFLINE_VLM_ARGS+=(--offline_vlm)
+fi
+
+GS_NORMAL_LOSS_ARGS=()
+if [[ "${GS_NORMAL_LOSS,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_NORMAL_LOSS_ARGS+=(--normal_loss)
 fi
 
 run_stage() {
@@ -105,7 +111,7 @@ if run_stage 5; then
     --downsample_pts_num "$GS_DOWNSAMPLE_PTS_NUM" \
     --save_ply --convert_to_spz --disable_video \
     --use_scale_regularization --antialiased \
-    --depth_loss --normal_loss --sky_depth_from_pcd \
+    --depth_loss "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
     --use_mask_gaussian --mask_export_stochastic \
     --no-mask-export-anchor-protection --use_anchor_protection --export_mesh \
     --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
