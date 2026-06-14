@@ -46,6 +46,7 @@ tqdm
 # GS training utilities
 viser
 tyro==1.0.8
+tensorly==0.8.1
 splines
 pymeshlab==2023.12.post2
 scikit-build-core

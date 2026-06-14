@@ -40,6 +40,41 @@ from gs.traj import (
     generate_spiral_path,
 )
 
+BilateralGrid = None
+color_correct = None
+slice = None
+total_variation_loss = None
+
+
+def ensure_bilateral_grid_imports(cfg: "Config") -> None:
+    """Load bilateral-grid helpers in every process, including DDP workers."""
+    global BilateralGrid, color_correct, slice, total_variation_loss
+
+    if not (cfg.use_bilateral_grid or cfg.use_fused_bilagrid):
+        return
+
+    if cfg.use_fused_bilagrid:
+        cfg.use_bilateral_grid = True
+        from fused_bilagrid import (
+            BilateralGrid as _BilateralGrid,
+            color_correct as _color_correct,
+            slice as _slice,
+            total_variation_loss as _total_variation_loss,
+        )
+    else:
+        cfg.use_bilateral_grid = True
+        from gs.lib_bilagrid import (
+            BilateralGrid as _BilateralGrid,
+            color_correct as _color_correct,
+            slice as _slice,
+            total_variation_loss as _total_variation_loss,
+        )
+
+    BilateralGrid = _BilateralGrid
+    color_correct = _color_correct
+    slice = _slice
+    total_variation_loss = _total_variation_loss
+
 
 @dataclass
 class Config:
@@ -3047,6 +3082,8 @@ class Runner:
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
+    ensure_bilateral_grid_imports(cfg)
+
     if world_size > 1 and not cfg.disable_viewer:
         cfg.disable_viewer = True
         if world_rank == 0:
@@ -3120,25 +3157,7 @@ if __name__ == "__main__":
     }
     cfg = tyro.extras.overridable_config_cli(configs)
     cfg.adjust_steps(cfg.steps_scaler)
-
-    # Import BilateralGrid and related functions based on configuration
-    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
-        if cfg.use_fused_bilagrid:
-            cfg.use_bilateral_grid = True
-            from fused_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
-        else:
-            cfg.use_bilateral_grid = True
-            from lib_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
+    ensure_bilateral_grid_imports(cfg)
 
     # try import extra dependencies
     if cfg.compression == "png":
