@@ -42,6 +42,7 @@ GS_LPIPS_LAMBDA1="${GS_LPIPS_LAMBDA1:-0.0}"
 GS_USE_MASK_GAUSSIAN="${GS_USE_MASK_GAUSSIAN:-0}"
 GS_USE_SCALE_REGULARIZATION="${GS_USE_SCALE_REGULARIZATION:-0}"
 GS_MEANS_LR="${GS_MEANS_LR:-3.2e-4}"
+GS_VIDEO_ONLY="${GS_VIDEO_ONLY:-0}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -75,6 +76,11 @@ fi
 GS_SCALE_REGULARIZATION_ARGS=()
 if [[ "${GS_USE_SCALE_REGULARIZATION,,}" =~ ^(1|true|yes|on)$ ]]; then
   GS_SCALE_REGULARIZATION_ARGS+=(--use_scale_regularization)
+fi
+
+GS_VIDEO_ONLY_ARGS=()
+if [[ "${GS_VIDEO_ONLY,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_VIDEO_ONLY_ARGS+=(--video_only)
 fi
 
 run_stage() {
@@ -131,6 +137,7 @@ if run_stage 5; then
     --lpips_lambda1 "$GS_LPIPS_LAMBDA1" \
     "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
     "${GS_MASK_GAUSSIAN_ARGS[@]}" \
+    "${GS_VIDEO_ONLY_ARGS[@]}" \
     --use_anchor_protection --export_mesh \
     --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
     --strategy.refine-every 100 --strategy.refine-scale2d-stop-iter 2000 \
