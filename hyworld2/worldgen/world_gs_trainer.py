@@ -111,6 +111,8 @@ class Config:
     polar_down_azimuth_interval: int = 1
     # Only keep video frames whose name starts with this prefix (e.g. "view_000-traj0"). None means no filter.
     video_prefix_filter: Optional[str] = None
+    # Exclude video frames whose name contains this substring. None means no exclusion.
+    video_exclude_substring: Optional[str] = None
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -765,6 +767,7 @@ def _passes_unity_train_camera_filter(
         pano_only: bool = False,
         video_only: bool = False,
         video_prefix_filter: Optional[str] = None,
+        video_exclude_substring: Optional[str] = None,
         pano_azimuth_interval: int = 1,
         polar_up_azimuth_interval: int = 1,
         polar_up_extra_layers: bool = True,
@@ -786,8 +789,11 @@ def _passes_unity_train_camera_filter(
             not is_pano
             and sorted_index % test_every != 0
             and (video_prefix_filter is None or name.startswith(video_prefix_filter))
+            and (video_exclude_substring is None or video_exclude_substring not in name)
         )
-    return sorted_index % test_every != 0 or is_pano
+    return (sorted_index % test_every != 0 or is_pano) and (
+        is_pano or video_exclude_substring is None or video_exclude_substring not in name
+    )
 
 
 def _round_float_list(values: np.ndarray, decimals: int = 7) -> List[float]:
@@ -842,6 +848,7 @@ def _build_unity_training_camera_set(
         pano_only: bool = False,
         video_only: bool = False,
         video_prefix_filter: Optional[str] = None,
+        video_exclude_substring: Optional[str] = None,
         pano_azimuth_interval: int = 1,
         polar_up_azimuth_interval: int = 1,
         polar_up_extra_layers: bool = True,
@@ -868,6 +875,7 @@ def _build_unity_training_camera_set(
                 pano_only=pano_only,
                 video_only=video_only,
                 video_prefix_filter=video_prefix_filter,
+                video_exclude_substring=video_exclude_substring,
                 pano_azimuth_interval=pano_azimuth_interval,
                 polar_up_azimuth_interval=polar_up_azimuth_interval,
                 polar_up_extra_layers=polar_up_extra_layers,
@@ -914,6 +922,7 @@ def _save_unity_dx12_camera_trajectory(
         pano_only: bool = False,
         video_only: bool = False,
         video_prefix_filter: Optional[str] = None,
+        video_exclude_substring: Optional[str] = None,
         pano_azimuth_interval: int = 1,
         polar_up_azimuth_interval: int = 1,
         polar_up_extra_layers: bool = True,
@@ -939,6 +948,7 @@ def _save_unity_dx12_camera_trajectory(
             pano_only=pano_only,
             video_only=video_only,
             video_prefix_filter=video_prefix_filter,
+            video_exclude_substring=video_exclude_substring,
             pano_azimuth_interval=pano_azimuth_interval,
             polar_up_azimuth_interval=polar_up_azimuth_interval,
             polar_up_extra_layers=polar_up_extra_layers,
@@ -1187,6 +1197,7 @@ class Runner:
             polar_up_extra_layers=cfg.polar_up_extra_layers,
             polar_down_azimuth_interval=cfg.polar_down_azimuth_interval,
             video_prefix_filter=cfg.video_prefix_filter,
+            video_exclude_substring=cfg.video_exclude_substring,
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
@@ -2159,6 +2170,7 @@ class Runner:
                             pano_only=cfg.pano_only,
                             video_only=cfg.video_only,
                             video_prefix_filter=cfg.video_prefix_filter,
+                            video_exclude_substring=cfg.video_exclude_substring,
                             pano_azimuth_interval=cfg.pano_azimuth_interval,
                             polar_up_azimuth_interval=cfg.polar_up_azimuth_interval,
                             polar_up_extra_layers=cfg.polar_up_extra_layers,

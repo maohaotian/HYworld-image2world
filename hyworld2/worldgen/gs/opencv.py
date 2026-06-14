@@ -1030,6 +1030,7 @@ class Dataset:
             polar_up_extra_layers: bool = True,
             polar_down_azimuth_interval: int = 1,
             video_prefix_filter: Optional[str] = None,
+            video_exclude_substring: Optional[str] = None,
     ):
         self.parser = parser
         self.split = split
@@ -1055,10 +1056,13 @@ class Dataset:
                         self.indices.append(idx)
                 elif video_only:
                     if not is_pano and idx % self.parser.test_every != 0:
-                        if video_prefix_filter is None or name.startswith(video_prefix_filter):
+                        prefix_ok = video_prefix_filter is None or name.startswith(video_prefix_filter)
+                        exclude_ok = video_exclude_substring is None or video_exclude_substring not in name
+                        if prefix_ok and exclude_ok:
                             self.indices.append(idx)
                 else:
-                    if idx % self.parser.test_every != 0 or is_pano:
+                    exclude_ok = is_pano or video_exclude_substring is None or video_exclude_substring not in name
+                    if (idx % self.parser.test_every != 0 or is_pano) and exclude_ok:
                         self.indices.append(idx)
                     if is_pano:
                         pano_indices.append(idx)
