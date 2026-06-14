@@ -42,6 +42,9 @@ GS_LPIPS_LAMBDA1="${GS_LPIPS_LAMBDA1:-0.0}"
 GS_USE_MASK_GAUSSIAN="${GS_USE_MASK_GAUSSIAN:-0}"
 GS_USE_SCALE_REGULARIZATION="${GS_USE_SCALE_REGULARIZATION:-0}"
 GS_MEANS_LR="${GS_MEANS_LR:-3.2e-4}"
+GS_DATA_DIR="${GS_DATA_DIR:-$TARGET_PATH/gs_data}"
+GS_SPLIT_ALIGN="${GS_SPLIT_ALIGN:-1}"
+GS_USE_ALIGN_PROTECTION="${GS_USE_ALIGN_PROTECTION:-1}"
 
 WORLDSTEREO_REPO="${WORLDSTEREO_REPO:-$CHECKPOINT_DIR/WorldStereo}"
 WORLDSTEREO_BASE_MODEL="${WORLDSTEREO_BASE_MODEL:-$CHECKPOINT_DIR/Wan2.1-I2V-14B-480P-Diffusers}"
@@ -75,6 +78,16 @@ fi
 GS_SCALE_REGULARIZATION_ARGS=()
 if [[ "${GS_USE_SCALE_REGULARIZATION,,}" =~ ^(1|true|yes|on)$ ]]; then
   GS_SCALE_REGULARIZATION_ARGS+=(--use_scale_regularization)
+fi
+
+GS_SPLIT_ALIGN_ARGS=()
+if [[ "${GS_SPLIT_ALIGN,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_SPLIT_ALIGN_ARGS+=(--split_align)
+fi
+
+GS_ALIGN_PROTECTION_ARGS=()
+if [[ "${GS_USE_ALIGN_PROTECTION,,}" =~ ^(1|true|yes|on)$ ]]; then
+  GS_ALIGN_PROTECTION_ARGS+=(--use_align_protection)
 fi
 
 run_stage() {
@@ -114,13 +127,14 @@ fi
 if run_stage 4; then
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" \
   "$TORCHRUN_BIN" --nproc_per_node=2 --master_port "$MASTER_PORT_STAGE4" gen_gs_data.py \
-    --root_path "$TARGET_PATH" --save_normal --split_sky
+    --root_path "$TARGET_PATH" --custom_out_name "$GS_DATA_DIR" --save_normal --split_sky \
+    "${GS_SPLIT_ALIGN_ARGS[@]}"
 fi
 
 if run_stage 5; then
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" \
   "$PYTHON_BIN" -m world_gs_trainer default \
-    --data_dir "$TARGET_PATH/gs_data" --result_dir "$RESULT_DIR" \
+    --data_dir "$GS_DATA_DIR" --result_dir "$RESULT_DIR" \
     --steps_scaler "$GS_STEPS_SCALER" \
     --sh_degree "$GS_SH_DEGREE" \
     --downsample_pts_num "$GS_DOWNSAMPLE_PTS_NUM" \
@@ -131,7 +145,7 @@ if run_stage 5; then
     --lpips_lambda1 "$GS_LPIPS_LAMBDA1" \
     "${GS_NORMAL_LOSS_ARGS[@]}" --sky_depth_from_pcd \
     "${GS_MASK_GAUSSIAN_ARGS[@]}" \
-    --use_anchor_protection --export_mesh \
+    --use_anchor_protection "${GS_ALIGN_PROTECTION_ARGS[@]}" --export_mesh \
     --strategy.refine-start-iter 400 --strategy.refine-stop-iter 2000 \
     --strategy.refine-every 100 --strategy.refine-scale2d-stop-iter 2000 \
     --strategy.reset-every 99990 --strategy.grow-grad2d 0.0001 \
