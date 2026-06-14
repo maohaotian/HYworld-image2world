@@ -1030,6 +1030,7 @@ class Dataset:
             polar_up_extra_layers: bool = True,
             polar_down_azimuth_interval: int = 1,
             video_prefix_filter: Optional[str] = None,
+            video_frame_interval: int = 1,
     ):
         self.parser = parser
         self.split = split
@@ -1055,10 +1056,16 @@ class Dataset:
                         self.indices.append(idx)
                 elif video_only:
                     if not is_pano and idx % self.parser.test_every != 0:
-                        if video_prefix_filter is None or name.startswith(video_prefix_filter):
+                        if (
+                            (video_prefix_filter is None or name.startswith(video_prefix_filter))
+                            and self._passes_video_frame_interval(name, video_frame_interval)
+                        ):
                             self.indices.append(idx)
                 else:
-                    if idx % self.parser.test_every != 0 or is_pano:
+                    if is_pano or (
+                        idx % self.parser.test_every != 0
+                        and self._passes_video_frame_interval(name, video_frame_interval)
+                    ):
                         self.indices.append(idx)
                     if is_pano:
                         pano_indices.append(idx)
@@ -1082,7 +1089,8 @@ class Dataset:
         print(f"[Dataset-{split}] total={len(names)}, video_frames={n_video}, "
               f"panorama={n_panorama}, polar_up={n_polar_up}, polar_down={n_polar_down}"
               + (f", polar_old={n_polar_old}" if n_polar_old > 0 else "")
-              + (f", pano_repeat={pano_repeat}" if pano_repeat > 1 else ""))
+              + (f", pano_repeat={pano_repeat}" if pano_repeat > 1 else "")
+              + (f", video_frame_interval={video_frame_interval}" if split == "train" and video_frame_interval > 1 else ""))
 
     @staticmethod
     def _passes_interval_filter(
@@ -1106,6 +1114,16 @@ class Dataset:
         elif source_type == "polar_down":
             return az_idx % polar_down_azimuth_interval == 0
         return True
+
+    @staticmethod
+    def _passes_video_frame_interval(name: str, video_frame_interval: int) -> bool:
+        if video_frame_interval <= 1:
+            return True
+        try:
+            frame_idx = int(name.rsplit("_", 1)[-1])
+        except (TypeError, ValueError):
+            return True
+        return frame_idx % video_frame_interval == 0
 
     def __len__(self):
         return len(self.indices)

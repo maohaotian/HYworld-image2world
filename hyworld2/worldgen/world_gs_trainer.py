@@ -76,6 +76,8 @@ class Config:
     polar_down_azimuth_interval: int = 1
     # Only keep video frames whose name starts with this prefix (e.g. "view_000-traj0"). None means no filter.
     video_prefix_filter: Optional[str] = None
+    # Keep every Nth video frame in the training split only. Validation split stays unchanged.
+    video_frame_interval: int = 1
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -1152,6 +1154,7 @@ class Runner:
             polar_up_extra_layers=cfg.polar_up_extra_layers,
             polar_down_azimuth_interval=cfg.polar_down_azimuth_interval,
             video_prefix_filter=cfg.video_prefix_filter,
+            video_frame_interval=cfg.video_frame_interval,
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
