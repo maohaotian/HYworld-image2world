@@ -34,6 +34,15 @@ Panorama generation:
   PANO_TRUE_CFG_SCALE      Qwen --true-cfg-scale. Default: 7.5
   PANO_CROP_BORDER         Qwen input crop border fraction. Default: 0.0
 
+Panorama super-resolution:
+  PANO_SR                  Generate panorama_sr.png after panorama.png. Default: 0
+  OVERWRITE_PANORAMA_SR    Regenerate panorama_sr.png if it already exists. Default: 0
+  PANO_SR_BACKEND          auto, realesrgan, or lanczos. Default: auto
+  PANO_SR_PAD              Horizontal wrap padding in source pixels. Default: 128
+  PANO_SR_TILE             Real-ESRGAN tile size. Default: 400
+  PANO_SR_TILE_PAD         Real-ESRGAN tile overlap. Default: 32
+  PANO_SR_MODEL_PATH       Optional Real-ESRGAN x2 weights path.
+
 Worldgen:
   STAGES                   Forwarded to scripts/run_worldgen_2gpu.sh. Default: all
   GS_STEPS_SCALER          Scales training duration only.
@@ -89,6 +98,8 @@ fi
 
 RUN_WORLDGEN="${RUN_WORLDGEN:-1}"
 OVERWRITE_PANORAMA="${OVERWRITE_PANORAMA:-0}"
+PANO_SR="${PANO_SR:-0}"
+OVERWRITE_PANORAMA_SR="${OVERWRITE_PANORAMA_SR:-0}"
 INPUT_MAX_EDGE="${INPUT_MAX_EDGE:-4096}"
 
 PANO_BACKEND="${PANO_BACKEND:-qwen}"
@@ -109,6 +120,12 @@ PANO_LORA_SUBFOLDER="${PANO_LORA_SUBFOLDER:-HY-Pano-2.0}"
 PANO_HUNYUAN_MODEL="${PANO_HUNYUAN_MODEL:-$CHECKPOINT_DIR/HY-World-2.0}"
 PANO_HUNYUAN_SUBFOLDER="${PANO_HUNYUAN_SUBFOLDER:-HY-Pano-2.0}"
 
+PANO_SR_BACKEND="${PANO_SR_BACKEND:-auto}"
+PANO_SR_PAD="${PANO_SR_PAD:-128}"
+PANO_SR_TILE="${PANO_SR_TILE:-400}"
+PANO_SR_TILE_PAD="${PANO_SR_TILE_PAD:-32}"
+PANO_SR_MODEL_PATH="${PANO_SR_MODEL_PATH:-}"
+
 mkdir -p "$CASE_DIR/input"
 
 INPUT_IMAGE_ABS="$("$PYTHON_BIN" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).expanduser().resolve())' "$INPUT_IMAGE")"
@@ -118,6 +135,7 @@ CASE_DIR="$CASE_DIR_ABS"
 PROCESSED_IMAGE="$CASE_DIR/input/input_rgb.png"
 INPUT_META="$CASE_DIR/input/input_meta.json"
 PANORAMA_PATH="$CASE_DIR/panorama.png"
+PANORAMA_SR_PATH="$CASE_DIR/panorama_sr.png"
 
 echo "[image-to-worldgen] case dir: $CASE_DIR"
 echo "[image-to-worldgen] input image: $INPUT_IMAGE_ABS"
@@ -220,6 +238,27 @@ with Image.open(p) as im:
 print(json.dumps(meta, indent=2))
 ' "$PANORAMA_PATH"
 
+if [[ "$PANO_SR" =~ ^(1|true|yes|on)$ ]]; then
+  if [[ ! -f "$PANORAMA_SR_PATH" || "$OVERWRITE_PANORAMA_SR" =~ ^(1|true|yes|on)$ ]]; then
+    echo "[image-to-worldgen] generating panorama super-resolution: $PANORAMA_SR_PATH"
+    PANO_SR_ARGS=(
+      --scene-dir "$CASE_DIR"
+      --repo-root "$ROOT_DIR"
+      --backend "$PANO_SR_BACKEND"
+      --pad "$PANO_SR_PAD"
+      --tile "$PANO_SR_TILE"
+      --tile-pad "$PANO_SR_TILE_PAD"
+      --force
+    )
+    if [[ -n "$PANO_SR_MODEL_PATH" ]]; then
+      PANO_SR_ARGS+=(--model-path "$PANO_SR_MODEL_PATH")
+    fi
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/upscale_panorama_sr.py" "${PANO_SR_ARGS[@]}"
+  else
+    echo "[image-to-worldgen] panorama_sr already exists, skipping: $PANORAMA_SR_PATH"
+  fi
+fi
+
 if [[ "$RUN_WORLDGEN" =~ ^(1|true|yes|on)$ ]]; then
   echo "[image-to-worldgen] running worldgen stages: ${STAGES:-all}"
   TARGET_PATH="$CASE_DIR" \
@@ -234,6 +273,7 @@ case_dir=$CASE_DIR
 input_image=$INPUT_IMAGE_ABS
 processed_image=$PROCESSED_IMAGE
 panorama=$PANORAMA_PATH
+panorama_sr=$PANORAMA_SR_PATH
 gs_result_dir=${RESULT_DIR:-$CASE_DIR/gs_result_2gpu}
 unity_export=${RESULT_DIR:-$CASE_DIR/gs_result_2gpu}/unity_export
 EOF
