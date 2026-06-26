@@ -254,6 +254,15 @@ output.save('output_panorama.png')
 | 4. GS 数据准备 | `gen_gs_data.py` | 提取用于 3DGS 训练的图像、对齐深度、法线和相机参数 |
 | 5. 3DGS 训练 | `world_gs_trainer.py` | 优化并导出最终的 Gaussian Splatting 世界 |
 
+如果需要运行“单图 + 文本提示 + 全景超分 + 3D 世界生成”的完整路径，请使用下面的封装脚本。它会先生成 `panorama.png`，在 `PANO_SR=1` 时生成 `panorama_sr.png`，然后继续执行完整的 worldgen 流水线。只要 `panorama_sr.png` 存在，`scripts/run_worldgen_2gpu.sh` 会自动优先使用它进行轨迹生成和 GS 数据准备。
+
+```bash
+PANO_SR=1 PANO_PROMPT="a realistic indoor living room with warm lighting" \
+  scripts/run_image_to_worldgen_2gpu.sh /path/to/input_image.jpg /path/to/output_case_dir
+```
+
+常用可选参数包括 `PANO_BACKEND=qwen|hunyuan`、`PANO_SR_BACKEND=auto|realesrgan|lanczos`、`PANO_SR_MODEL_PATH=/path/to/RealESRGAN_x2plus.pth`；如果只想生成全景和超分结果、暂不进入 3D worldgen，可以设置 `RUN_WORLDGEN=0`。
+
 完整文档、运行前置条件和命令行参数，请参阅 **[hyworld2/worldgen/README.md](hyworld2/worldgen/README.md)**。
 
 ### 代码使用 — WorldMirror 2.0
