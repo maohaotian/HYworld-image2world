@@ -1,9 +1,12 @@
 import json
 import math
 import os
+import re
 import time
 from collections import defaultdict
+from copy import deepcopy
 from dataclasses import dataclass, field
+from glob import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -167,7 +170,14 @@ class Config:
     lpips_lambda1: float = 0.2
     lpips_lambda2: float = 0.1
 
-    preload_gs_path: str = None
+    preload_gs_path: Optional[str] = None
+    # Resume training from saved per-rank Gaussian checkpoints.
+    # Supports a directory, a glob such as ckpt_4999_rank*.pt, or a path
+    # containing "{rank}".
+    resume_gs_path: Optional[str] = None
+    # Original training horizon used by the checkpoint being resumed. This is
+    # used only to decay the resumed means learning rate consistently.
+    resume_source_max_steps: Optional[int] = None
 
     """If enabled, a scale regularization introduced in PhysGauss (https://xpandora.github.io/PhysGaussian/) is used for reducing huge spikey gaussians."""
     use_scale_regularization: bool = False
@@ -515,6 +525,46 @@ def create_splats_with_optimizers(
     return splats, optimizers
 
 
+def _checkpoint_step(path: str) -> int:
+    match = re.search(r"ckpt_(\d+)_rank\d+\.pt$", os.path.basename(path))
+    return int(match.group(1)) if match else -1
+
+
+def resolve_rank_resume_checkpoint(path: str, world_rank: int, world_size: int) -> str:
+    if os.path.isdir(path):
+        candidates = glob(os.path.join(path, f"ckpt_*_rank{world_rank}.pt"))
+    elif "{rank}" in path:
+        candidates = [path.format(rank=world_rank)]
+    elif any(ch in path for ch in "*?["):
+        candidates = [
+            p for p in glob(path)
+            if f"rank{world_rank}" in os.path.basename(p)
+        ]
+    elif world_size > 1 and re.search(r"rank\d+", os.path.basename(path)):
+        candidates = [re.sub(r"rank\d+", f"rank{world_rank}", path)]
+    else:
+        candidates = [path]
+
+    candidates = [p for p in candidates if os.path.isfile(p)]
+    if not candidates:
+        raise FileNotFoundError(
+            f"No resume checkpoint found for rank {world_rank}: {path}"
+        )
+    candidates.sort(key=lambda p: (_checkpoint_step(p), os.path.getmtime(p)))
+    return candidates[-1]
+
+
+def read_cfg_max_steps(path: str) -> Optional[int]:
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            match = re.match(r"^max_steps:\s*(\d+)\s*$", line)
+            if match:
+                return int(match.group(1))
+    return None
+
+
 # ====== MaskGaussian Helper Functions ======
 def compute_mask_gate(
         mask_score: torch.Tensor,
@@ -809,7 +859,62 @@ def _select_default_unity_trajectory(trajectories: List[Dict], preferred_name: O
         for trajectory in trajectories:
             if trajectory["name"] == preferred_name:
                 return trajectory
+    for source_name in ("view0/traj0", "view0/traj1", "view0/traj2"):
+        for trajectory in trajectories:
+            if trajectory["name"] == source_name:
+                return trajectory
     return trajectories[0]
+
+
+def _find_unity_source_view_frame(
+        trajectories: List[Dict],
+        training_views: Optional[Dict],
+) -> Tuple[Optional[Dict], Optional[str]]:
+    """Find the source image view that stage-1 keeps as view0 frame 0."""
+    for source_name in ("view0/traj0", "view0/traj1", "view0/traj2"):
+        for trajectory in trajectories:
+            if trajectory["name"] == source_name and trajectory.get("frames"):
+                return trajectory["frames"][0], source_name
+
+    if training_views is not None:
+        source_frame_names = (
+            "view0-traj0_000000",
+            "view0-traj1_000000",
+            "view0-traj2_000000",
+        )
+        for frame_name in source_frame_names:
+            for frame in training_views.get("frames", []):
+                if frame.get("name") == frame_name:
+                    return frame, "training_views/" + frame_name
+    return None, None
+
+
+def _unity_frames_start_at_same_camera(lhs: Dict, rhs: Dict, atol: float = 1e-6) -> bool:
+    lhs_matrix = lhs.get("transform_matrix")
+    rhs_matrix = rhs.get("transform_matrix")
+    if lhs_matrix is None or rhs_matrix is None:
+        return False
+    return bool(np.allclose(np.asarray(lhs_matrix), np.asarray(rhs_matrix), atol=atol, rtol=0.0))
+
+
+def _retime_unity_frames(frames: List[Dict], frame_rate: float) -> List[Dict]:
+    retimed = deepcopy(frames)
+    for frame_idx, frame in enumerate(retimed):
+        frame["time"] = round(float(frame_idx) / frame_rate, 6)
+    return retimed
+
+
+def _prepend_unity_source_view_frame(
+        frames: List[Dict],
+        source_frame: Dict,
+        source_name: str,
+        frame_rate: float,
+) -> List[Dict]:
+    startup_frame = deepcopy(source_frame)
+    startup_frame["name"] = "source_input_view"
+    startup_frame["source_frame_name"] = source_frame.get("name")
+    startup_frame["source_trajectory"] = source_name
+    return _retime_unity_frames([startup_frame] + frames, frame_rate)
 
 
 def _build_unity_camera_frame(
@@ -1004,11 +1109,29 @@ def _save_unity_dx12_camera_trajectory(
         selected = _select_default_unity_trajectory(trajectories, default_trajectory)
     else:
         selected = training_views
+    selected_frames = selected["frames"]
+    source_view_frame, source_view_name = _find_unity_source_view_frame(trajectories, training_views)
+    prepended_source_view = False
+    if (
+            default_trajectory is not None
+            and selected_frames
+            and source_view_frame is not None
+            and not _unity_frames_start_at_same_camera(selected_frames[0], source_view_frame)
+    ):
+        selected_frames = _prepend_unity_source_view_frame(
+            selected_frames,
+            source_view_frame,
+            source_view_name,
+            frame_rate,
+        )
+        prepended_source_view = True
     payload = {
         "coordinate_system": "Unity DX12 RUF, +Y up, +Z forward",
         "frame_rate": frame_rate,
         "default_trajectory": selected["name"],
-        "frames": selected["frames"],
+        "source_view_trajectory": source_view_name,
+        "prepended_source_view": prepended_source_view,
+        "frames": selected_frames,
         "trajectories": trajectories,
     }
     if training_views is not None:
@@ -1019,7 +1142,8 @@ def _save_unity_dx12_camera_trajectory(
     return {
         "trajectory_count": len(trajectories),
         "training_view_count": len(training_views["frames"]) if training_views is not None else 0,
-        "frame_count": len(selected["frames"]),
+        "frame_count": len(selected_frames),
+        "prepended_source_view": int(prepended_source_view),
     }
 
 
@@ -1234,6 +1358,68 @@ class Runner:
             mask_init_value=cfg.mask_init_value,
         )
         print("Model initialized. Number of GS:", len(self.splats["means"]))
+        self.resume_step = 0
+        self.resume_ckpt_path = None
+        self.resume_source_max_steps = cfg.resume_source_max_steps
+        if cfg.resume_gs_path is not None:
+            if self.resume_source_max_steps is None:
+                self.resume_source_max_steps = read_cfg_max_steps(
+                    os.path.join(cfg.result_dir, "cfg.yml")
+                )
+            self.resume_ckpt_path = resolve_rank_resume_checkpoint(
+                cfg.resume_gs_path,
+                world_rank=self.world_rank,
+                world_size=self.world_size,
+            )
+            print(f"[Resume] Rank {self.world_rank}: loading {self.resume_ckpt_path}")
+            ckpt = torch.load(
+                self.resume_ckpt_path,
+                map_location=self.device,
+                weights_only=False,
+            )
+            missing_keys = [
+                key for key in self.splats.keys()
+                if key not in ckpt["splats"]
+            ]
+            if missing_keys:
+                raise KeyError(
+                    f"Resume checkpoint missing splat keys: {missing_keys}"
+                )
+            self.splats = torch.nn.ParameterDict({
+                key: torch.nn.Parameter(ckpt["splats"][key].to(self.device))
+                for key in self.splats.keys()
+            }).to(self.device)
+
+            optimizer_class = torch.optim.SparseAdam if cfg.sparse_grad else (
+                SelectiveAdam if cfg.visible_adam else torch.optim.Adam
+            )
+            BS = cfg.batch_size * world_size
+            optimizer_lrs = {
+                name: optimizer.param_groups[0]["lr"]
+                for name, optimizer in self.optimizers.items()
+            }
+            self.optimizers = {
+                name: optimizer_class(
+                    [{
+                        "params": self.splats[name],
+                        "lr": optimizer_lrs[name],
+                        "name": name,
+                    }],
+                    eps=1e-15 / math.sqrt(BS),
+                    betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
+                )
+                for name in self.splats.keys()
+            }
+            self.resume_step = int(ckpt.get("step", -1)) + 1
+            print(
+                f"[Resume] Rank {self.world_rank}: restored "
+                f"{len(self.splats['means'])} GS, starting at step {self.resume_step}."
+            )
+            if self.resume_source_max_steps is not None:
+                print(
+                    f"[Resume] Rank {self.world_rank}: previous max_steps="
+                    f"{self.resume_source_max_steps}."
+                )
 
         # Densification Strategy
         self.cfg.strategy.check_sanity(self.splats, self.optimizers)
@@ -1250,17 +1436,22 @@ class Runner:
         # Anchor protection: mark outlier/sparse initial points as anchors
         N_init = len(self.splats["means"])
         if cfg.use_anchor_protection:
-            is_outlier_full = torch.from_numpy(self.parser.points_is_outlier).bool()
-            # Distribute to current rank (same as points[world_rank::world_size])
-            is_outlier = is_outlier_full[self.world_rank::self.world_size]
-            # If preload_gs_path is used, the splats are concatenated with preloaded ones.
-            # Preloaded points are NOT marked as anchors.
-            if is_outlier.shape[0] < N_init:
-                is_outlier = torch.cat([
-                    is_outlier,
-                    torch.zeros(N_init - is_outlier.shape[0], dtype=torch.bool)
-                ])
-            self.strategy_state["is_anchor"] = is_outlier.to(self.device)
+            if cfg.resume_gs_path is not None:
+                self.strategy_state["is_anchor"] = torch.zeros(
+                    N_init, dtype=torch.bool, device=self.device
+                )
+            else:
+                is_outlier_full = torch.from_numpy(self.parser.points_is_outlier).bool()
+                # Distribute to current rank (same as points[world_rank::world_size])
+                is_outlier = is_outlier_full[self.world_rank::self.world_size]
+                # If preload_gs_path is used, the splats are concatenated with preloaded ones.
+                # Preloaded points are NOT marked as anchors.
+                if is_outlier.shape[0] < N_init:
+                    is_outlier = torch.cat([
+                        is_outlier,
+                        torch.zeros(N_init - is_outlier.shape[0], dtype=torch.bool)
+                    ])
+                self.strategy_state["is_anchor"] = is_outlier.to(self.device)
             n_anchor = self.strategy_state["is_anchor"].sum().item()
             print(f"[Anchor Protection] Protected anchor points: {n_anchor} / {N_init}")
         else:
@@ -1270,14 +1461,19 @@ class Runner:
 
         # Align protection: mark aligned_pcd points
         if cfg.use_align_protection:
-            is_align_full = torch.from_numpy(self.parser.points_is_align).bool()
-            is_align = is_align_full[self.world_rank::self.world_size]
-            if is_align.shape[0] < N_init:
-                is_align = torch.cat([
-                    is_align,
-                    torch.zeros(N_init - is_align.shape[0], dtype=torch.bool)
-                ])
-            self.strategy_state["is_align"] = is_align.to(self.device)
+            if cfg.resume_gs_path is not None:
+                self.strategy_state["is_align"] = torch.zeros(
+                    N_init, dtype=torch.bool, device=self.device
+                )
+            else:
+                is_align_full = torch.from_numpy(self.parser.points_is_align).bool()
+                is_align = is_align_full[self.world_rank::self.world_size]
+                if is_align.shape[0] < N_init:
+                    is_align = torch.cat([
+                        is_align,
+                        torch.zeros(N_init - is_align.shape[0], dtype=torch.bool)
+                    ])
+                self.strategy_state["is_align"] = is_align.to(self.device)
             n_align = self.strategy_state["is_align"].sum().item()
             print(f"[Align Protection] Protected align points: {n_align} / {N_init}")
         else:
@@ -1504,7 +1700,11 @@ class Runner:
                 yaml.dump(vars(cfg), f)
 
         max_steps = cfg.max_steps
-        init_step = 0
+        init_step = self.resume_step
+        if init_step >= max_steps:
+            raise ValueError(
+                f"resume step {init_step} is already >= max_steps {max_steps}"
+            )
 
         schedulers = [
             # means has a learning rate schedule, that end at 0.01 of the initial value
@@ -1536,6 +1736,19 @@ class Runner:
                 )
             )
 
+        if init_step > 0:
+            prev_max_steps = self.resume_source_max_steps or max_steps
+            decay_steps = min(init_step, prev_max_steps)
+            means_decay = (0.01 ** (1.0 / prev_max_steps)) ** decay_steps
+            for group in self.optimizers["means"].param_groups:
+                group["lr"] *= means_decay
+            if world_rank == 0:
+                print(
+                    f"[Resume] Applied means LR decay for {decay_steps}/"
+                    f"{prev_max_steps} previous steps; current lr="
+                    f"{self.optimizers['means'].param_groups[0]['lr']:.3e}."
+                )
+
         trainloader = torch.utils.data.DataLoader(
             self.trainset,
             batch_size=cfg.batch_size,
@@ -1548,6 +1761,8 @@ class Runner:
 
         # Training loop.
         global_tic = time.time()
+        if init_step > 0 and world_rank == 0:
+            print(f"[Resume] Continuing training from step {init_step} to {max_steps}.")
         save_steps = {i - 1 for i in cfg.save_steps}
         ply_steps = {i - 1 for i in cfg.ply_steps}
         eval_steps = {i - 1 for i in cfg.eval_steps}

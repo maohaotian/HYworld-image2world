@@ -16,7 +16,7 @@ from PIL import Image
 from moge.model.v2 import MoGeModel
 from tqdm import tqdm
 
-from src.general_utils import rank0_log, Timer, load_video, save_16bit_png_depth
+from src.general_utils import rank0_log, Timer, load_video, load_16bit_png_depth, save_16bit_png_depth
 from src.panorama_utils import split_panorama_image, split_panorama_depth, rotate_around_z_axis
 
 timer = Timer()
@@ -29,7 +29,7 @@ def resolve_moge_checkpoint(path):
     return path
 
 
-def save_io(fname, frame_img, depth_path, normal_map, w2c, K, output_path):
+def save_io(fname, frame_img, depth_path, normal_map, w2c, K, output_path, depth_size=None):
     img_path = f"{output_path}/images/{fname}.png"
     depth_target_path = f"{output_path}/depths/{fname}.png"
     normal_path = f"{output_path}/normals/{fname}.png"
@@ -37,7 +37,17 @@ def save_io(fname, frame_img, depth_path, normal_map, w2c, K, output_path):
     # Save the RGB frame.
     frame_img.save(img_path)
     if depth_path is not None:
-        shutil.copy(depth_path, depth_target_path)
+        if depth_size is None:
+            shutil.copy(depth_path, depth_target_path)
+        else:
+            with Image.open(depth_path) as depth_img:
+                source_size = depth_img.size
+            if source_size == depth_size:
+                shutil.copy(depth_path, depth_target_path)
+            else:
+                depth = load_16bit_png_depth(depth_path)
+                depth = cv2.resize(depth, depth_size, interpolation=cv2.INTER_NEAREST)
+                save_16bit_png_depth(depth, depth_target_path)
 
     if normal_map is not None:
         Image.fromarray(((normal_map + 1.0) / 2.0 * 255.0).astype(np.uint8)).save(normal_path)
@@ -267,6 +277,8 @@ if __name__ == '__main__':
                     render_camera = json.load(f)
                 w2cs = np.array(render_camera["extrinsic"])
                 Ks = np.array(render_camera["intrinsic"])
+                camera_width = render_camera.get("width")
+                camera_height = render_camera.get("height")
 
                 if w2cs.shape[0] != len(frames):
                     if w2cs.shape[0] == 81 and len(frames) == 21:
@@ -292,6 +304,13 @@ if __name__ == '__main__':
                     for i in tqdm(range(len(frames)), disable=rank != 0):
                         if frames[i].size[0] != img_width or frames[i].size[1] != img_height:
                             frames[i] = frames[i].resize((img_width, img_height), Image.LANCZOS)
+                        K = Ks[i].copy()
+                        if camera_width is not None and camera_height is not None:
+                            sx = img_width / float(camera_width)
+                            sy = img_height / float(camera_height)
+                            if abs(sx - 1.0) > 1e-6 or abs(sy - 1.0) > 1e-6:
+                                K[0, :] *= sx
+                                K[1, :] *= sy
 
                         memory_bank_path = f"{scene_path}/render_results/generation_bank_{result_name}/{view_id}/{traj_id}"
                         depth_path = f"{memory_bank_path}/depths/{indices[i]:04d}.png"
@@ -307,7 +326,7 @@ if __name__ == '__main__':
 
                         fname = f"{view_id}-{traj_id}_{indices[i]:06d}"
 
-                        fut = executor.submit(save_io, fname, frames[i], depth_path, normal_map, w2cs[i], Ks[i], output_path)
+                        fut = executor.submit(save_io, fname, frames[i], depth_path, normal_map, w2cs[i], K, output_path, frames[i].size)
                         futures.append(fut)
 
                     for fut in as_completed(futures):

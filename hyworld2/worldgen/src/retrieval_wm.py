@@ -73,6 +73,27 @@ def resolve_moge_checkpoint(path):
     return path
 
 
+def resize_pil_image(image: Image.Image, width: int, height: int) -> Image.Image:
+    target_size = (width, height)
+    if image.size == target_size:
+        return image
+    return image.resize(target_size, Image.Resampling.BICUBIC)
+
+
+def resize_image_and_intrinsic(image: Image.Image, intrinsic: np.ndarray, width: int, height: int) -> tuple[Image.Image, np.ndarray]:
+    """Resize an image and keep its pinhole intrinsic matrix in sync."""
+    source_width, source_height = image.size
+    target_size = (width, height)
+    if image.size == target_size:
+        return image, intrinsic
+
+    resized_image = image.resize(target_size, Image.Resampling.BICUBIC)
+    resized_intrinsic = intrinsic.copy().astype(np.float32)
+    resized_intrinsic[0, :] *= width / source_width
+    resized_intrinsic[1, :] *= height / source_height
+    return resized_image, resized_intrinsic
+
+
 def statistical_outlier_removal(points, colors, nb_neighbors=20, std_ratio=2.0):
     """
     KNN-based Statistical Outlier Removal.
@@ -826,10 +847,13 @@ class PanoramaMemoryBank:
             key = img_p.split('/')[-1].split('.')[0]
             view_id, traj_id = img_p.split('/')[-4], img_p.split('/')[-3]
             fname = f"{view_id}/{traj_id}/{key}"
+            image = Image.open(img_p).convert('RGB')
+            intrinsic = np.array(cam_dict[key]['intrinsic'], dtype=np.float32)
+            image, intrinsic = resize_image_and_intrinsic(image, intrinsic, self.image_width, self.image_height)
             return (
                 np.array(cam_dict[key]['extrinsic']),
-                np.array(cam_dict[key]['intrinsic']),
-                Image.open(img_p).convert('RGB'),
+                intrinsic,
+                image,
                 load_16bit_png_depth(dep_p),
                 fname
             )
@@ -1011,7 +1035,8 @@ class PanoramaMemoryBank:
                 retrieval_map[best_idx] = i - 1  # key: best_idx, value: the frame index in retrieved_frames corresponding to best_idx, recording only the earliest occurrence.
             ref_index_dict[retrieval_map[best_idx]][i] = {"score": best_score, "angle_diff": angle_diff}  # key: frame index in retrieved_frames, value: target position corresponding to that retrieval frame.
 
-            retrieved_frames.append(np.array(self.ref_frames[best_idx])[None])
+            retrieved_frame = resize_pil_image(self.ref_frames[best_idx], self.image_width, self.image_height)
+            retrieved_frames.append(np.array(retrieved_frame)[None])
             retrieved_w2cs.append(self.ref_w2cs[best_idx])
             retrieved_Ks.append(self.ref_Ks[best_idx])
             retrieved_global_indices.append(best_idx)
@@ -1052,7 +1077,12 @@ class PanoramaMemoryBank:
                     retrieval_map[best_idx] = i - 1  # key: best_idx, value: the frame index in retrieved_frames corresponding to best_idx, recording only the earliest occurrence.
                 ref_index_dict[retrieval_map[best_idx]][i] = {"score": best_score, "angle_diff": angle_diff}  # key: frame index in retrieved_frames, value: target position corresponding to that retrieval frame.
 
-                retrieved_frames.append(np.array(retrieved_frames_selected[best_idx]))
+                selected_frame = np.array(retrieved_frames_selected[best_idx][0])
+                if selected_frame.shape[0] != self.image_height or selected_frame.shape[1] != self.image_width:
+                    selected_frame = np.array(
+                        Image.fromarray(selected_frame).resize((self.image_width, self.image_height), Image.Resampling.BICUBIC)
+                    )
+                retrieved_frames.append(selected_frame)
                 ref_w2cs.append(retrieved_w2cs[best_idx])  # Reorder retrieved_w2cs.
                 retrieved_global_indices.append(retrieved_global_indices_selected[best_idx])
         else:
@@ -1080,7 +1110,7 @@ class PanoramaMemoryBank:
         indices = sample_align_nframe(nframe, self.align_nframe)
         updated_tar_w2cs = tar_w2cs_full[indices]
         updated_tar_Ks = tar_Ks_full[indices]
-        gen_frames = [gen_frames[idx] for idx in indices]
+        gen_frames = [resize_pil_image(gen_frames[idx], self.image_width, self.image_height) for idx in indices]
 
         # Update memory bank cache.
         self.ref_w2cs = torch.cat([self.ref_w2cs, updated_tar_w2cs.to(self.device)], dim=0)

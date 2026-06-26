@@ -27,6 +27,53 @@ def assign_scale(h, w, scale_map=None):
     return best_scale
 
 
+def get_scale_map(base_model: str | None, scale_map=None):
+    """
+    Return a resolution map matched to the Wan base model family.
+
+    480P models stay on the original map. 720P models use a higher map
+    that preserves the same aspect-ratio buckets at 1.5x the linear size.
+    """
+    if base_model and "720P" in base_model.upper():
+        return [
+            [720, 1248],
+            [720, 1152],
+            [768, 1184],
+            [768, 1088],
+            [864, 1056],
+            [864, 960],
+            [960, 960],
+            [960, 864],
+            [1056, 864],
+            [1088, 768],
+            [1184, 768],
+            [1152, 720],
+            [1248, 720],
+        ]
+
+    if base_model and "480P" in base_model.upper():
+        return [
+            [480, 832],
+            [480, 768],
+            [512, 784],
+            [512, 720],
+            [576, 704],
+            [576, 640],
+            [640, 640],
+            [640, 576],
+            [704, 576],
+            [720, 512],
+            [784, 512],
+            [768, 480],
+            [832, 480],
+        ]
+
+    if scale_map is not None:
+        return scale_map
+
+    return [[480, 768], [512, 720], [576, 640], [608, 608], [640, 576], [720, 512], [768, 480]]
+
+
 def sort_trajs(scene_path):
     # Generation order: (view*: up --> right --> left) --> target* --> reconstruct* --> wonder*
     view_paths = glob(f"{scene_path}/view*")
@@ -103,7 +150,9 @@ def load_mutli_traj_dataset(cfg, input_path, output_path, view_id, traj_id, devi
         else:
             pil_image = Image.open(f"{input_path}/image.png")
     origin_w, origin_h = pil_image.size
-    height, width = assign_scale(origin_h, origin_w, scale_map=cfg.scale_map)
+    base_model = getattr(cfg, "base_model", None)
+    scale_map = get_scale_map(base_model, getattr(cfg, "scale_map", None))
+    height, width = assign_scale(origin_h, origin_w, scale_map=scale_map)
     pil_image = pil_image.resize((width, height), Image.Resampling.BICUBIC)
     meta = {"image": pil_image}
 

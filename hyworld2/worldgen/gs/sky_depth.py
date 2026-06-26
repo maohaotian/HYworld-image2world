@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional
 import imageio
 import numpy as np
 import torch
+import torch.nn.functional as F
 import tqdm
 from .utils import knn, load_16bit_png_depth
 from torch import Tensor
@@ -31,6 +32,30 @@ CameraSpec = namedtuple("CameraSpec", ["item_idx", "viewmat", "K", "width", "hei
 # Type alias for a render function:
 #   (points, cameras, device, batch_size) -> {item_idx: depth_hw}
 RenderFn = Callable[[np.ndarray, List[CameraSpec], torch.device, int], Dict[int, Tensor]]
+
+
+def resize_hw_tensor(tensor: Tensor, target_hw: tuple[int, int], mode: str) -> Tensor:
+    """Resize a 2D or CHW tensor to target ``(height, width)``."""
+    target_h, target_w = target_hw
+    if tensor.shape[-2:] == (target_h, target_w):
+        return tensor
+    if tensor.ndim == 2:
+        resized = F.interpolate(
+            tensor[None, None].float(),
+            size=(target_h, target_w),
+            mode=mode,
+            align_corners=False if mode in {"bilinear", "bicubic"} else None,
+        )
+        return resized[0, 0].to(dtype=tensor.dtype)
+    if tensor.ndim == 3:
+        resized = F.interpolate(
+            tensor[None].float(),
+            size=(target_h, target_w),
+            mode=mode,
+            align_corners=False if mode in {"bilinear", "bicubic"} else None,
+        )
+        return resized[0].to(dtype=tensor.dtype)
+    raise ValueError(f"Expected 2D or CHW tensor, got shape {tuple(tensor.shape)}")
 
 
 # ===================================================================
@@ -206,6 +231,9 @@ def precompute_sky_depth_maps(
         gt_depth, normals = futures[cam.item_idx].result()
 
         if gt_depth is not None and normals is not None:
+            target_hw = sky_depth_hw.shape[-2:]
+            gt_depth = resize_hw_tensor(gt_depth, target_hw, mode="nearest")
+            normals = resize_hw_tensor(normals, target_hw, mode="bilinear")
             no_gt = gt_depth < 1e-4
             is_sky_normal = normals.norm(dim=0) < sky_normal_threshold
             has_sky_coverage = sky_depth_hw > 0
