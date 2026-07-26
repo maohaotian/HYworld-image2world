@@ -144,6 +144,11 @@ class Config:
     save_ply: bool = False
     # Whether to convert to spz
     convert_to_spz: bool = False
+    # Whether to export Unity DX12 assets. This writes a Unity-aligned PLY and
+    # camera trajectory JSON without requiring the generic point_cloud_*.spz.
+    export_unity: bool = False
+    # Whether the Unity export should also include a compressed SPZ.
+    export_unity_spz: bool = False
     # Whether to convert to spx
     convert_to_spx: bool = False
     # Steps to save the model as ply
@@ -1239,7 +1244,7 @@ def _save_spz_cloud_to_matching_ply_schema(cloud, template_ply_path: str, output
 def _save_unity_dx12_spz(
         spz,
         ply_path: str,
-        output_path: str,
+        output_path: Optional[str],
         up_direction_rdf: np.ndarray,
         antialiased: bool,
         ply_output_path: Optional[str] = None,
@@ -1253,14 +1258,84 @@ def _save_unity_dx12_spz(
     align_rotation = _rotation_matrix_from_vectors(source_up, np.array([0.0, 1.0, 0.0]))
     _rotate_spz_cloud(cloud, align_rotation)
 
-    pack_options = spz.PackOptions()
-    if hasattr(pack_options, "version"):
-        pack_options.version = 3
-    pack_options.from_coord = spz.CoordinateSystem.RUF
-    spz.save_spz(cloud, pack_options, output_path)
+    if output_path is not None:
+        pack_options = spz.PackOptions()
+        if hasattr(pack_options, "version"):
+            pack_options.version = 3
+        pack_options.from_coord = spz.CoordinateSystem.RUF
+        spz.save_spz(cloud, pack_options, output_path)
 
     if ply_output_path is not None:
         _save_spz_cloud_to_matching_ply_schema(cloud, ply_path, ply_output_path)
+
+
+def export_unity_dx12_assets(
+        ply_path: str,
+        data_dir: str,
+        result_dir: str,
+        step: int,
+        up_direction_rdf: np.ndarray,
+        world_transform: Optional[np.ndarray],
+        antialiased: bool,
+        write_spz: bool = False,
+        unity_camera_trajectory: Optional[str] = None,
+        unity_camera_fps: float = 30.0,
+        test_every: int = 8,
+        pano_only: bool = False,
+        video_only: bool = False,
+        video_prefix_filter: Optional[str] = None,
+        video_exclude_substring: Optional[str] = None,
+        pano_azimuth_interval: int = 1,
+        polar_up_azimuth_interval: int = 1,
+        polar_up_extra_layers: bool = True,
+        polar_down_azimuth_interval: int = 1,
+) -> Dict[str, Union[str, int, None]]:
+    import spz
+
+    unity_export_dir = f"{result_dir}/unity_export"
+    os.makedirs(unity_export_dir, exist_ok=True)
+    data_dir_path = Path(data_dir)
+    scene_root = data_dir_path.parent if data_dir_path.name.startswith("gs_data") else data_dir_path
+    unity_export_basename = _unity_export_basename(scene_root, step)
+    unity_spz_path = f"{unity_export_dir}/{unity_export_basename}.spz"
+    unity_ply_path = f"{unity_export_dir}/{unity_export_basename}.ply"
+    unity_camera_path = f"{unity_export_dir}/{unity_export_basename}.json"
+
+    _save_unity_dx12_spz(
+        spz=spz,
+        ply_path=ply_path,
+        output_path=unity_spz_path if write_spz else None,
+        up_direction_rdf=up_direction_rdf,
+        antialiased=antialiased,
+        ply_output_path=unity_ply_path,
+    )
+    camera_export = _save_unity_dx12_camera_trajectory(
+        scene_root=scene_root,
+        output_path=unity_camera_path,
+        up_direction_rdf=up_direction_rdf,
+        world_transform=world_transform,
+        fps=unity_camera_fps,
+        default_trajectory=unity_camera_trajectory,
+        training_camera_dir=data_dir,
+        test_every=test_every,
+        pano_only=pano_only,
+        video_only=video_only,
+        video_prefix_filter=video_prefix_filter,
+        video_exclude_substring=video_exclude_substring,
+        pano_azimuth_interval=pano_azimuth_interval,
+        polar_up_azimuth_interval=polar_up_azimuth_interval,
+        polar_up_extra_layers=polar_up_extra_layers,
+        polar_down_azimuth_interval=polar_down_azimuth_interval,
+    )
+
+    return {
+        "ply": unity_ply_path,
+        "spz": unity_spz_path if write_spz else None,
+        "camera_json": unity_camera_path if camera_export is not None else None,
+        "trajectory_count": camera_export["trajectory_count"] if camera_export is not None else 0,
+        "training_view_count": camera_export["training_view_count"] if camera_export is not None else 0,
+        "frame_count": camera_export["frame_count"] if camera_export is not None else 0,
+    }
 
 class Runner:
     """Engine for training and testing."""
@@ -2357,30 +2432,19 @@ class Runner:
                         pack_options.from_coord = spz.CoordinateSystem.RDF  # from RDF to RUB
                         spz.save_spz(cloud, pack_options, f"{self.ply_dir}/point_cloud_{step}.spz")
 
-                        unity_export_dir = f"{cfg.result_dir}/unity_export"
-                        os.makedirs(unity_export_dir, exist_ok=True)
-                        data_dir_path = Path(cfg.data_dir)
-                        scene_root = data_dir_path.parent if data_dir_path.name.startswith("gs_data") else data_dir_path
-                        unity_export_basename = _unity_export_basename(scene_root, step)
-                        unity_spz_path = f"{unity_export_dir}/{unity_export_basename}.spz"
-                        unity_ply_path = f"{unity_export_dir}/{unity_export_basename}.ply"
-                        unity_camera_path = f"{unity_export_dir}/{unity_export_basename}.json"
-                        _save_unity_dx12_spz(
-                            spz=spz,
-                            ply_path=ply_path,
-                            output_path=unity_spz_path,
-                            up_direction_rdf=np.array(self.parser.up_direction),
-                            antialiased=cfg.antialiased,
-                            ply_output_path=unity_ply_path,
-                        )
-                        camera_export = _save_unity_dx12_camera_trajectory(
-                            scene_root=scene_root,
-                            output_path=unity_camera_path,
+                    if cfg.export_unity or cfg.convert_to_spz:
+                        print("Exporting Unity DX12 assets...")
+                        unity_export = export_unity_dx12_assets(
+                            ply_path=f"{self.ply_dir}/point_cloud_{step}.ply",
+                            data_dir=cfg.data_dir,
+                            result_dir=cfg.result_dir,
+                            step=step,
                             up_direction_rdf=np.array(self.parser.up_direction),
                             world_transform=np.array(self.parser.transform),
-                            fps=cfg.unity_camera_fps,
-                            default_trajectory=cfg.unity_camera_trajectory,
-                            training_camera_dir=cfg.data_dir,
+                            antialiased=cfg.antialiased,
+                            write_spz=cfg.export_unity_spz or cfg.convert_to_spz,
+                            unity_camera_trajectory=cfg.unity_camera_trajectory,
+                            unity_camera_fps=cfg.unity_camera_fps,
                             test_every=cfg.test_every,
                             pano_only=cfg.pano_only,
                             video_only=cfg.video_only,
@@ -2391,12 +2455,12 @@ class Runner:
                             polar_up_extra_layers=cfg.polar_up_extra_layers,
                             polar_down_azimuth_interval=cfg.polar_down_azimuth_interval,
                         )
-                        if camera_export is not None:
-                            print(
-                                "Exported Unity DX12 camera trajectory "
-                                f"with {camera_export['trajectory_count']} trajectories "
-                                f"to {unity_camera_path}"
-                            )
+                        print(
+                            "Exported Unity DX12 assets "
+                            f"(frames={unity_export['frame_count']}, "
+                            f"trajectories={unity_export['trajectory_count']}) "
+                            f"to {cfg.result_dir}/unity_export"
+                        )
 
                     if cfg.convert_to_spx:
                         # convert to spx
@@ -2493,7 +2557,9 @@ class Runner:
                                 o3d.io.write_triangle_mesh(
                                     f"{self.ply_dir}/fuse_simplified.ply", mesh_simplified)
 
-                    dist.barrier()
+                    if world_size > 1:
+                        import torch.distributed as torch_dist
+                        torch_dist.barrier()
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:

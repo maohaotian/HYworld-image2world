@@ -55,10 +55,13 @@ if __name__ == '__main__':
     parser.add_argument("--sam3_model", default=os.environ.get("HY_SAM3_PATH", SAM3_REPO_ID), type=str,
                         help="SAM3 HF repo ID or local checkpoint path.")
     parser.add_argument("--fsdp", action="store_true", help="Enable FSDP model sharding")
+    parser.add_argument("--cpu_offload", action="store_true", help="Offload WorldStereo pipeline modules to CPU between calls")
     parser.add_argument("--skip_exist", action="store_true", help="skip existing videos")
     parser.add_argument("--seed", default=1024, type=int, help="Random seed")
 
     args = parser.parse_args()
+    if args.fsdp and args.cpu_offload:
+        parser.error("--fsdp and --cpu_offload cannot be enabled together")
 
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -110,6 +113,9 @@ if __name__ == '__main__':
         device_mesh=device_mesh,
         device=device,
     )
+    if args.cpu_offload:
+        worldstereo.pipeline.enable_model_cpu_offload(device=device)
+        rank0_log("WorldStereo model CPU offload enabled.")
     dist.barrier()
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
@@ -208,6 +214,9 @@ if __name__ == '__main__':
                 # pipeline inference
                 with timer.track("Video Model Inference"), torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
                     output = worldstereo.pipeline(**pipeline_kwargs).frames[0].float()
+
+                if args.cpu_offload:
+                    output = output.cpu()
 
                 gc.collect()
                 torch.cuda.empty_cache()

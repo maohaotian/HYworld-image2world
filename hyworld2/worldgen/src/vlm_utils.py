@@ -19,6 +19,20 @@ def build_openai_client(llm_addr=None, llm_port=None, llm_base_url=None):
     return OpenAI(api_key=api_key, base_url=base_url.rstrip("/"))
 
 
+def create_chat_completion_with_fallback(client, model_name, **kwargs):
+    try:
+        return client.chat.completions.create(model=model_name, **kwargs)
+    except Exception as primary_error:
+        fallback_model = os.environ.get("LLM_FALLBACK_NAME", "").strip()
+        if not fallback_model or fallback_model == model_name:
+            raise
+        print(
+            f"[VLM] Primary model {model_name} failed: {primary_error}. "
+            f"Retrying with fallback model {fallback_model}."
+        )
+        return client.chat.completions.create(model=fallback_model, **kwargs)
+
+
 def parse_selected_indices_and_reasons(text):
     try:
         data = json.loads(text)
@@ -191,8 +205,9 @@ def get_traj_caption(LLM_ADDR, LLM_PORT, MODEL_NAME, traj_path, sample_count=8, 
         {"role": "system", "content": "You are a video annotation assistant."},
         {"role": "user", "content": content_list}
     ]
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
+    response = create_chat_completion_with_fallback(
+        client,
+        MODEL_NAME,
         messages=messages,
         max_tokens=1024,  # Adjust max_tokens to keep it concise
         temperature=0.1,
@@ -236,8 +251,9 @@ def generate_motion_caption_from_plot(client, model_name, plot_path):
     ]
 
     try:
-        response = client.chat.completions.create(
-            model=model_name,
+        response = create_chat_completion_with_fallback(
+            client,
+            model_name,
             messages=messages,
             max_tokens=100,
             temperature=0.1  # Low temperature for objectivity
@@ -319,8 +335,9 @@ def generate_video_caption(client, model_name, frames, scene_context="", target_
     ]
 
     try:
-        response = client.chat.completions.create(
-            model=model_name,
+        response = create_chat_completion_with_fallback(
+            client,
+            model_name,
             messages=messages,
             max_tokens=1024,
             temperature=0.1

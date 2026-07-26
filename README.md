@@ -253,14 +253,19 @@ The world Generation pipeline turns a panorama scene into a navigable 3D world t
 | 4. GS Data Preparation | `gen_gs_data.py` | Extract frames, aligned depth, normals, and cameras for 3DGS training |
 | 5. 3DGS Training | `world_gs_trainer.py` | Optimize and export the final Gaussian Splatting world |
 
-For single-image + text-prompt world generation with panorama super-resolution, use the wrapper script below. It generates `panorama.png`, optionally upscales it to `panorama_sr.png`, and then runs the full world generation pipeline. When `panorama_sr.png` exists, `scripts/run_worldgen_2gpu.sh` automatically uses it for trajectory generation and GS data preparation.
+For single-image + text-prompt world generation with panorama super-resolution, run the pipeline in two steps so you can inspect the panorama before spending time on worldgen training. The first command generates `panorama.png`, upscales it to `panorama_sr.png`, writes `panorama_sr_preview.jpg`, and stops. After you approve the panorama, the second command continues worldgen stages 1-5. When `panorama_sr.png` exists, `scripts/run_worldgen_2gpu.sh` automatically uses it for trajectory generation and GS data preparation.
 
 ```bash
-PANO_SR=1 PANO_PROMPT="a realistic indoor living room with warm lighting" \
-  scripts/run_image_to_worldgen_2gpu.sh /path/to/input_image.jpg /path/to/output_case_dir
+PANO_PROMPT="a realistic indoor living room with warm lighting" \
+  scripts/run_image_to_panorama_sr.sh /path/to/input_image.jpg /path/to/output_case_dir
+
+# Inspect /path/to/output_case_dir/panorama_sr_preview.jpg before continuing.
+
+CUDA_VISIBLE_DEVICES=0,1 \
+  scripts/run_panorama_to_worldgen_2gpu.sh /path/to/output_case_dir
 ```
 
-Useful overrides include `PANO_BACKEND=qwen|hunyuan`, `PANO_SR_BACKEND=auto|realesrgan|lanczos`, `PANO_SR_MODEL_PATH=/path/to/RealESRGAN_x2plus.pth`, and `RUN_WORLDGEN=0` if you only want to stop after panorama generation and SR.
+Useful overrides include `PANO_BACKEND=qwen|hunyuan`, `PANO_SR_BACKEND=auto|realesrgan|lanczos`, and `PANO_SR_MODEL_PATH=/path/to/RealESRGAN_x2plus.pth`. The original one-shot wrapper remains available as `scripts/run_image_to_worldgen_2gpu.sh`.
 
 For full documentation, prerequisites, and CLI arguments, see **[hyworld2/worldgen/README.md](hyworld2/worldgen/README.md)**.
 

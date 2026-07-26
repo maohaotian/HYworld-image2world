@@ -55,7 +55,7 @@ from src.panorama_utils import (
 )
 from src.pointcloud import point_rendering
 from src.seg_utils import get_zim_mask, build_gd_model, build_zim_model
-from src.vlm_utils import build_openai_client, get_qwen_caption_format
+from src.vlm_utils import build_openai_client, create_chat_completion_with_fallback, get_qwen_caption_format
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 timer = Timer()
@@ -292,7 +292,14 @@ if __name__ == '__main__':
             ]
             print(f"Qwen3-VL labeling meta information for {scene_path}...")
             with timer.track("Qwen3-VL labeling meta information"):
-                response = client.chat.completions.create(model=MODEL_NAME, messages=messages, max_tokens=1024, temperature=0.0, seed=1024)
+                response = create_chat_completion_with_fallback(
+                    client,
+                    MODEL_NAME,
+                    messages=messages,
+                    max_tokens=1024,
+                    temperature=0.0,
+                    seed=1024,
+                )
                 clean_text = response.choices[0].message.content.strip().replace('[', '').replace(']', '').replace('"', '').replace("'", "").replace("```json", "").replace("```", "")
             meta_info["scene_type"] = clean_text
             with open(f"{scene_path}/meta_info.json", "w") as write:
@@ -712,7 +719,14 @@ if __name__ == '__main__':
                     ]
                     print(f"Qwen3-VL labeling for {scene_path}...")
                     with timer.track("Qwen3-VL labeling objects"):
-                        response = client.chat.completions.create(model=MODEL_NAME, messages=messages, max_tokens=1024, temperature=0.0, seed=1024)
+                        response = create_chat_completion_with_fallback(
+                            client,
+                            MODEL_NAME,
+                            messages=messages,
+                            max_tokens=1024,
+                            temperature=0.0,
+                            seed=1024,
+                        )
                         clean_text = response.choices[0].message.content.strip().replace('[', '').replace(']', '').replace('"', '').replace("'", "").replace("```json", "").replace("```", "").replace("-", "_")
                         unique_objects = deduplicate_ordered([item.strip() for item in clean_text.split(',') if item.strip()])
                     with open(os.path.join(scene_path, "objects.json"), "w") as f:
