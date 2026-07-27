@@ -1,0 +1,12 @@
+__pycache__/
+.claude/
+*.py[cod]
+*$py.class
+.gradio/
+inference_output/
+gradio_demo_output/
+skyseg.onnx
+*.safetensors
+*.ckpt
+CLAUDE.md
+commands.sh
