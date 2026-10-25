@@ -42,11 +42,11 @@ It covers the last three stages of the full HY-World 2.0 pipeline:
       --gpu-memory-utilization 0.80
   ```
 
-- Model checkpoints for WorldStereo 2.0 (see [Model Zoo](../../README.md#-model-zoo), and codes will download weights automatically)
+- Model checkpoints for WorldStereo 2.0 (see [Model weights](../../README.md#model-weights) for the fork's local model layout).
 
 ### Installation
 
-Please follow the root installation guide in [HY-World 2.0 Get Started](../../README.md#-get-started).
+Please follow the root [installation guide](../../README.md#installation).
 
 <details>
 <summary><b>Installation Notes</b></summary>

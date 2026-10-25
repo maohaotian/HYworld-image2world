@@ -1,523 +1,326 @@
+# HYworld-image2world
 
+**Single-image world generation, staged GS training, and Unity-ready scene exports.**
 
-<h1>HY-World 2.0: A Multi-Modal World Model for Reconstructing, Generating, and Simulating 3D Worlds</h1>
+[English](README.md) · [简体中文](README_zh.md) · [Upstream HY-World 2.0](https://github.com/Tencent-Hunyuan/HY-World-2.0) · [Issues](https://github.com/maohaotian/HYworld-image2world/issues)
 
-[English](README.md) | [简体中文](README_zh.md)
+HYworld-image2world is an engineering fork of Tencent's HY-World 2.0. It connects image preprocessing, panorama generation, panorama super-resolution, world expansion, Gaussian Splatting optimization, and Unity export in a configurable workflow. You can inspect a panorama before generating a full scene, rerun selected stages, and export the scene together with its cameras.
 
-<p align="center">
-  <img src="assets/teaser.png" width="95%" alt="HY-World-2.0 Teaser">
-</p>
+The pretrained models and overall architecture come from upstream. This repository focuses on adapting the pipeline for high-resolution inputs and downstream use in Unity. It does not introduce a new foundation model or include a Unity/VR application.
 
-<div align="center">
-  <a href=https://3d.hunyuan.tencent.com/sceneTo3D target="_blank"><img src=https://img.shields.io/badge/Official%20Site-333399.svg?logo=homepage height=22px></a>
-  <a href=https://huggingface.co/tencent/HY-World-2.0 target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Models-d96902.svg height=22px></a>
-  <a href=https://3d-models.hunyuan.tencent.com/world/ target="_blank"><img src= https://img.shields.io/badge/Page-bb8a2e.svg?logo=github height=22px></a>
-  <a href=https://arxiv.org/abs/2604.14268 target="_blank"><img src=https://img.shields.io/badge/Report-b5212f.svg?logo=arxiv height=22px></a>
-   <a href=https://modelscope.cn/models/Tencent-Hunyuan/HY-World-2.0 target="_blank"><img src=https://img.shields.io/badge/ModelScope-Models-624aff.svg height=22px></a>
-  <a href=https://discord.gg/dNBrdrGGMa target="_blank"><img src= https://img.shields.io/badge/Discord-white.svg?logo=discord height=22px></a>
-  <a href=https://x.com/TencentHunyuan target="_blank"><img src=https://img.shields.io/badge/Tencent%20HY-black.svg?logo=x height=22px></a>
- <a href="#community-resources" target="_blank"><img src=https://img.shields.io/badge/Community-lavender.svg?logo=homeassistantcommunitystore height=22px></a>
-</div>
+## Contents
 
-<br>
-<p align="center">
-  <i>"What Is Now Proved Was Once Only Imagined"</i>
-</p>
+- [What changed](#what-changed)
+- [Pipeline](#pipeline)
+- [Installation](#installation)
+- [Model weights](#model-weights)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Outputs and viewing](#outputs-and-viewing)
+- [Limitations and troubleshooting](#limitations-and-troubleshooting)
+- [Contributing](#contributing)
+- [Acknowledgments and license](#acknowledgments-and-license)
 
-## 🎥 Video
-https://github.com/user-attachments/assets/b56f4750-25c9-48fb-83ff-d58526711463
+## What changed
 
-## 🔥 News
+The fork retains the upstream models and adds the following implementation changes:
 
-- **[May 18, 2026]**: 🤗 Open-source World Generation inference code and WorldStereo 2.0 model weights!
-- **[May 11, 2026]**: 🤗 Open-source HY-Pano 2.0 inference code and model weights!
-- **[April 16, 2026]**: 🚀 Release HY-World 2.0 technical report & partial codes!
-- **[April 16, 2026]**: 🤗 Open-source WorldMirror 2.0 inference code and model weights!
+| Area | Changes in this repository |
+| --- | --- |
+| Pipeline entry points | Wrappers for single-image generation, panorama-only review, generation from an accepted panorama, and two-GPU reconstruction. Worldgen stages can be selected independently. |
+| Inputs and panoramas | Preserve the original image; apply EXIF orientation and proportional resizing to the working copy; record preprocessing metadata. Add optional 2× panorama upscaling with horizontal wrap padding, preview, and backend/statistics metadata. |
+| High-resolution GS data | Prefer an SR panorama when present. Scale camera intrinsics with frame resolution, resize matching depth maps, reconcile sky-depth/normal resolutions, and record frame provenance. |
+| Model and VLM configuration | Expose local checkpoint paths, an explicit WorldStereo base model, local-only loading, and CPU offload. Support configurable OpenAI-compatible vision endpoints, API keys, an optional fallback model, and deterministic VLM-free fallbacks. |
+| GS optimization | Expose training duration, SH degree, point budget, losses, and frame selection. Add per-rank checkpoint resume and source-horizon handling; fix distributed bilateral-grid imports. Scale training duration without also changing densification cadence. |
+| Unity export | Export coordinate-aligned GS PLYs and camera JSON, including available training views and generated trajectories. Add optional SPZ output and an exporter for existing trained PLYs. |
 
+The changes live primarily in [`scripts/`](scripts/), [`world_gs_trainer.py`](hyworld2/worldgen/world_gs_trainer.py), [`gen_gs_data.py`](hyworld2/worldgen/gen_gs_data.py), and the worldgen camera, VLM, and model-loading utilities. These are engineering changes and configurable experiments, not a claim of improved quality on every scene.
 
-## 📋 Table of Contents
-- [📖 Introduction](#-introduction)
-- [✨ Highlights](#-highlights)
-- [🧩 Architecture](#-architecture)
-- [📝 Open-Source Plan](#-open-source-plan)
-- [🎁 Model Zoo](#-model-zoo)
-- [🤗 Get Started](#-get-started)
-- [🔮 Performance](#-performance)
-- [🎬 More Examples](#-more-examples)
-- [📚 Citation](#-citation)
+## Pipeline
 
-
-## 📖 Introduction
-
-**HY-World 2.0** is a multi-modal world model framework for **world generation** and **world reconstruction**. It accepts diverse input modalities — text, single-view images, multi-view images, and videos — and produces 3D world representations (meshes / Gaussian Splattings). It offers two core capabilities:
-
-- **World Generation** (text / single image &rarr; 3D world): syntheses high-fidelity, navigable 3D scenes through a four-stage method —— a) ![Panorama Generation](https://img.shields.io/badge/Panorama_Generation-4285F4?style=flat-square) with HY-Pano 2.0, b) ![Trajectory Planning](https://img.shields.io/badge/Trajectory_Planning-EA4335?style=flat-square) with WorldNav, c) ![World Expansion](https://img.shields.io/badge/World_Expansion-FBBC05?style=flat-square) with WorldStereo 2.0, and d) ![World Composition](https://img.shields.io/badge/World_Composition-34A853?style=flat-square) with WorldMirror 2.0 & 3DGS learning.
-- **World Reconstruction** (multi-view images / video &rarr; 3D): Powered by WorldMirror 2.0, a unified feed-forward model that simultaneously predicts depth, surface normals, camera parameters, 3D point clouds, and 3DGS attributes in a single forward pass.
-
-HY-World 2.0 is an **open-source state-of-the-art** world model.  We released all model weights, code, and technical details to facilitate reproducibility and advance research in this field.
-
-### Why 3D World Models?
-
-Existing world models, such as Genie 3, Cosmos, and HY-World 1.5 (WorldPlay+WorldCompass), generate pixel-level videos — essentially "watching a movie" that vanishes once playback ends. **HY-World 2.0 takes a fundamentally different approach**: it directly produces editable, persistent 3D assets (meshes / 3DGS) that can be imported into game engines like Blender/Unity/Unreal Engine/Isaac Sim — more like "building a playable game" than recording a clip. This paradigm shift natively resolves many long-standing pain points of video world models:
-
-|  | Video World Models | 3D World Model (HY-World 2.0) |
-|--|---|---|
-| **Output** | Pixel videos (non-editable) | Real 3D assets — meshes / 3DGS (fully editable) |
-| **Playable Duration** | Limited (typically 1 min) | Unlimited — assets persist permanently |
-| **3D Consistency** | No (flickering, artifacts across views) | Native — inherently consistent in 3D |
-| **Real-Time Rendering** | Requires per-frame inference; high latency | Consumer GPUs can render in real time |
-| **Controllability** | Weak (imprecise character control, no real physics) | Precise — zero-error control, real physics collision, accurate lighting |
-| **Inference Cost** | Accumulates with every interaction | One-time generation; rendering cost ≈ 0 |
-| **Engine Compatibility** | ✗ Video files only | ✓ Directly importable into Blender / UE / Isaac Engine |
-| | $\color{IndianRed}{\textsf{Watch a video, then it's gone}}$ | $\color{RoyalBlue}{\textbf{Build a world, keep it forever}}$ |
-
-
-<table align="center" style="border: none;">
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_1.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_2.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_7.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_8.gif" width="100%"></td>
-  </tr>
-</table>
-
-<p align="center"><em>All above are <strong>real 3D assets</strong> (not generated videos) and entirely created by HY-World 2.0 -- captured from live real-time interaction.</em></p>
-
-## ✨ Highlights
-
-- **Real 3D Worlds, Not Just Videos**
-
-  Unlike video-only world models (e.g., Genie 3, HY World 1.5), HY-World 2.0 generates **real 3D assets** — 3DGS, meshes, and point clouds — that are freely explorable, editable, and directly importable into **Unity / Unreal Engine / Isaac**. From a single text prompt or image, create navigable 3D worlds with diverse styles: realistic, cartoon, game, and more.
-
-<p align="center">
-  <img src="assets/mesh_en.gif" width="95%">
-</p>
-
-
-- **Instant 3D Reconstruction from Photos & Videos**
-
-  Powered by **WorldMirror 2.0**, a unified feed-forward model that predicts dense point clouds, depth maps, surface normals, camera parameters, and 3DGS from multi-view images or casual videos in a single forward pass. Supports flexible-resolution inference (50K–500K pixels) with SOTA accuracy. Capture a video, get a digital twin.
-
-<p align="center">
-  <img src="assets/recon_en.gif" width="95%">
-</p>
-
-- **Interactive Character Exploration**
-
-  Go beyond viewing — **play inside your generated worlds**. HY-World 2.0 supports first-person navigation and third-person character mode, enabling users to freely explore AI-generated streets, buildings, and landscapes with physics-based collision.  Go to [our product page](https://3d.hunyuan.tencent.com/sceneTo3D) for free try. 
-
-<p align="center">
-  <img src="assets/interactive.gif" width="95%">
-</p>
-
-
-## 🧩 Architecture
-- **Refer to our tech report for more details**
-
-  A systematic pipeline of HY-World 2.0 — *Panorama Generation* (HY-Pano-2.0) &rarr; *Trajectory Planning* (WorldNav) &rarr; *World Expansion* (WorldStereo 2.0) &rarr; *World Composition* (WorldMirror 2.0 + Splattings Learning) — that automatically transforms text or a single image into a high-fidelity, navigable 3D world (3DGS/mesh outputs).
-
-<p align="center">
-  <img src="assets/overview.png" width="95%">
-</p>
-
-
-## 📝 Open-Source Plan
-
-- [x] Technical Report
-- [x] WorldMirror 2.0 Code & Model Checkpoints
-- [x] Full Inference Code for World Generation (WorldNav + WorldStereo + World Composition)
-- [x] Panorama Generation (HY-Pano 2.0) Model & Code
-- [x] World Expansion (WorldStereo 2.0) Model & Code
-
-
-## 🎁 Model Zoo
-
-### World Reconstruction — WorldMirror Series
-
-| Model | Description | Params | Date | Hugging Face |
-|-------|-------------|--------|------|--------------|
-| WorldMirror-2 [new] | Multi-view / video &rarr; 3D reconstruction | ~1.2B | 2026 | [Download](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-WorldMirror-2.0) |
-| WorldMirror-1 | Multi-view / video &rarr; 3D reconstruction (legacy) | ~1.2B | 2025 | [Download](https://huggingface.co/tencent/HunyuanWorld-Mirror/tree/main) |
-
-### Panorama Generation — HY-Pano Series
-
-| Model | Description | Params | Date | Hugging Face |
-|-------|-------------|--------|------|--------------|
-| HY-Pano-2 [new] | Text / image → 360° panorama | ~80B | 2026 | [Download](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-Pano-2.0) |
-| HY-Pano-2-Qwen [new] | Text / image → 360° panorama | ~425M | 2026 | [Download](https://huggingface.co/tencent/HY-World-2.0/blob/main/HY-Pano-2.0/pytorch_lora_weights.safetensors) |
-
-### World Expansion — WorldStereo Series
-
-| Model           | Description | Params | Date | Hugging Face |
-|-----------------|-------------|-----|------|--------------|
-| WorldStereo-2 [new] | Panorama &rarr;  3DGS world |  ~17B  | 2026 | [Download](https://huggingface.co/hanshanxue/WorldStereo/tree/main) |
-
-We recommend referring to our previous works, [WorldStereo](https://github.com/FuchengSu/WorldStereo) and [WorldMirror](https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror), for background knowledge on 3D world generation and reconstruction. 
-
-## 🤗 Get Started
-
-### Install Requirements
-
-We recommend **CUDA 12.8** and **Python 3.11+**. The easiest path is to prepare one shared environment, first make **World Reconstruction (WorldMirror 2.0)** work, and then install the extra components required by **World Generation**.
-
-#### 1. Create the shared environment
-
-```bash
-git clone https://github.com/Tencent-Hunyuan/HY-World-2.0
-cd HY-World-2.0
-
-conda create -n hyworld2 python=3.11.15
-conda activate hyworld2
+```text
+Image + optional prompt
+  → HY-Pano panorama → optional 2× panorama SR
+  → trajectory planning/rendering → WorldStereo expansion
+  → RGB/depth/normal/camera preparation → GS optimization
+  → native scene PLY + Unity PLY/camera JSON
 ```
 
-#### 2. Install World Reconstruction dependencies
+After panorama generation, the worldgen launcher exposes five stages:
 
-After this step, the environment is ready for **worldrecon / WorldMirror 2.0**.
+| Stage | Component | Purpose |
+| --- | --- | --- |
+| 1 | `traj_generate.py` | Analyze the panorama and plan trajectories. |
+| 2 | `traj_render.py` | Render initial trajectory views and prepare captions. |
+| 3 | `video_gen.py` | Expand the scene using WorldStereo. |
+| 4 | `gen_gs_data.py` | Prepare training views, depth, normals, and cameras. |
+| 5 | `world_gs_trainer.py` | Optimize Gaussians and export assets. |
 
-```bash
-# Base dependencies shared by worldrecon and worldgen
-pip install -r requirements.txt
+The inherited multi-view/video reconstruction path is also available through [`hyworld2/worldrecon`](hyworld2/worldrecon), without panorama generation.
 
-# Recommended: install the custom gsplat variant once for both worldrecon and worldgen
-cd hyworld2/worldgen/third_party/gsplat_maskgaussian
-pip install -e . --no-build-isolation
-cd ../../../../
-```
+## Installation
 
-If you only need **worldrecon** and want a simpler fallback, official `gsplat` is also supported:
+### Requirements
 
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
-```
+- Linux, Python 3.11, NVIDIA GPUs, and a compatible CUDA toolkit/compiler. CUDA 12.8 is the reference installation target.
+- PyTorch 2.7.1 and torchvision 0.22.1, as pinned in the root requirements. Native rasterization and geometry extensions must match the environment.
+- The worldgen wrappers use two GPU processes by default for stages 2–4. Full generation requires substantial GPU memory, host RAM, and disk space; this fork does not provide a measured consumer-GPU minimum.
+- Access to the model repositories and, for the default planning route, an image-capable VLM endpoint.
 
-Install **one** FlashAttention backend:
-
-```bash
-# Recommended for Hopper GPUs: FlashAttention-3
-git clone https://github.com/Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-python setup.py install
-cd ../../
-rm -rf flash-attention
-```
+### Environment and extensions
 
 ```bash
-# Simpler alternative: FlashAttention-2
-pip install flash-attn --no-build-isolation
-```
+git clone --recurse-submodules https://github.com/maohaotian/HYworld-image2world.git
+cd HYworld-image2world
 
-#### 3. Add extra World Generation dependencies
+conda create -n hyworld python=3.11 -y
+conda activate hyworld
 
-Run the following extra steps only if you need **worldgen**. These commands assume the shared `hyworld2` environment above is already active.
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install --no-build-isolation -r requirements_git.txt
 
-```bash
-# Git-based dependencies require torch/CUDA to be installed first
-pip install --no-build-isolation -r requirements_git.txt
-
-# recastnavigation is managed as a git submodule
 git submodule update --init --recursive
-
-# Recast navmesh extension for trajectory planning
-cd hyworld2/worldgen/third_party/navmesh
-pip install . --no-build-isolation
-cd ../../../../
+python -m pip install -e hyworld2/worldgen/third_party/gsplat_maskgaussian --no-build-isolation
+python -m pip install ./hyworld2/worldgen/third_party/navmesh --no-build-isolation
+python -m pip install flash-attn --no-build-isolation
 ```
 
-For **HY-Pano-2** installation, please refer to **[hyworld2/panogen/README.md](hyworld2/panogen/README.md)**.
+Worldgen training uses the custom `gsplat` variant; stock `gsplat` is not an equivalent backend for every option. The `spz` package is also used internally during Unity PLY conversion, even when saving an SPZ file is disabled.
 
-### Code Usage — Panorama Generation (HY-Pano-2)
-
-For full documentation and CLI reference, see **[hyworld2/panogen/README.md](hyworld2/panogen/README.md)**.
-
-We provide a `diffusers`-like Python API for HY-Pano 2.0. Model weights are automatically downloaded from Hugging Face on first run.
-
-```python
-from pipeline import HunyuanPanoPipeline
-
-pipeline = HunyuanPanoPipeline.from_pretrained('tencent/HY-World-2.0')
-output = pipeline('input.png')
-output.save('output_panorama.png')
-```
-
-### Code Usage — World Generation (WorldNav, WorldStereo-2, and 3DGS)
-
-The world Generation pipeline turns a panorama scene into a navigable 3D world through five stages:
-
-| Stage | Script | Description |
-|-------|--------|-------------|
-| 1. Trajectory Planning | `traj_generate.py` | VLM-guided camera trajectory planning with obstacle-aware navigation |
-| 2. Trajectory Rendering | `traj_render.py` | Multi-GPU point-cloud rendering along planned trajectories |
-| 3. World Expansion | `video_gen.py` | WorldStereo-2 keyframe generation with memory-guided consistency |
-| 4. GS Data Preparation | `gen_gs_data.py` | Extract frames, aligned depth, normals, and cameras for 3DGS training |
-| 5. 3DGS Training | `world_gs_trainer.py` | Optimize and export the final Gaussian Splatting world |
-
-For single-image + text-prompt world generation with panorama super-resolution, run the pipeline in two steps so you can inspect the panorama before spending time on worldgen training. The first command generates `panorama.png`, upscales it to `panorama_sr.png`, writes `panorama_sr_preview.jpg`, and stops. After you approve the panorama, the second command continues worldgen stages 1-5. When `panorama_sr.png` exists, `scripts/run_worldgen_2gpu.sh` automatically uses it for trajectory generation and GS data preparation.
+For learned panorama SR, install the optional packages:
 
 ```bash
-PANO_PROMPT="a realistic indoor living room with warm lighting" \
-  scripts/run_image_to_panorama_sr.sh /path/to/input_image.jpg /path/to/output_case_dir
-
-# Inspect /path/to/output_case_dir/panorama_sr_preview.jpg before continuing.
-
-CUDA_VISIBLE_DEVICES=0,1 \
-  scripts/run_panorama_to_worldgen_2gpu.sh /path/to/output_case_dir
+python -m pip install realesrgan basicsr
 ```
 
-Useful overrides include `PANO_BACKEND=qwen|hunyuan`, `PANO_SR_BACKEND=auto|realesrgan|lanczos`, and `PANO_SR_MODEL_PATH=/path/to/RealESRGAN_x2plus.pth`. The original one-shot wrapper remains available as `scripts/run_image_to_worldgen_2gpu.sh`.
+The [panorama module documentation](hyworld2/panogen/README.md) covers the alternative Hunyuan backend. Its standalone requirements have different NumPy/Transformers pins; do not install them over the shared environment without resolving those differences.
 
-For full documentation, prerequisites, and CLI arguments, see **[hyworld2/worldgen/README.md](hyworld2/worldgen/README.md)**.
+## Model weights
 
-### Code Usage — WorldMirror 2.0
-WorldMirror 2.0 supports the following usage modes:
+Weights and generated scenes are not distributed with this source repository. The default Qwen-based route expects:
 
-- [Code Usage](#code-usage--worldmirror-20)
-- [Gradio App](#gradio-app--worldmirror-20)
-
-We provide a `diffusers`-like Python API for WorldMirror 2.0. Model weights are automatically downloaded from Hugging Face on first run.
-
-```python
-from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
-
-pipeline = WorldMirrorPipeline.from_pretrained('tencent/HY-World-2.0')
-result = pipeline('path/to/images')
+```text
+checkpoints/
+├── HY-World-2.0/
+│   ├── HY-Pano-2.0/
+│   └── HY-WorldMirror-2.0/
+├── Qwen-Image-Edit-2509/
+├── WorldStereo/
+│   └── worldstereo-memory-dmd/
+├── Wan2.1-I2V-14B-720P-Diffusers/
+├── moge-2-vitl-normal/
+│   └── model.pt
+└── sam3/
 ```
 
-**With Prior Injection (Camera & Depth):**
+| Component | Source |
+| --- | --- |
+| HY-Pano adapter and WorldMirror | [tencent/HY-World-2.0](https://huggingface.co/tencent/HY-World-2.0) |
+| Qwen panorama base model | [Qwen/Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) |
+| WorldStereo | [hanshanxue/WorldStereo](https://huggingface.co/hanshanxue/WorldStereo) |
+| WorldStereo base model | [Wan-AI/Wan2.1-I2V-14B-720P-Diffusers](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P-Diffusers) |
+| Depth and normals | [Ruicheng/moge-2-vitl-normal](https://huggingface.co/Ruicheng/moge-2-vitl-normal) |
+| Segmentation | [facebook/sam3](https://huggingface.co/facebook/sam3) |
 
-```python
-result = pipeline(
-    'path/to/images',
-    prior_cam_path='path/to/prior_camera.json',
-    prior_depth_path='path/to/prior_depth/',
-)
-```
-
-> For the detailed structure of camera/depth priors and how to prepare them, see [Prior Preparation Guide](DOCUMENTATION.md#prior-injection).
-
-**CLI:**
+For example, using the Hugging Face CLI after obtaining any required model access:
 
 ```bash
-# Single GPU
-python -m hyworld2.worldrecon.pipeline --input_path path/to/images
-
-# Multi-GPU
-torchrun --nproc_per_node=2 -m hyworld2.worldrecon.pipeline \
-    --input_path path/to/images \
-    --use_fsdp --enable_bf16
+hf download tencent/HY-World-2.0 --local-dir checkpoints/HY-World-2.0 \
+  --include 'HY-Pano-2.0/*' 'HY-WorldMirror-2.0/*'
+hf download Qwen/Qwen-Image-Edit-2509 --local-dir checkpoints/Qwen-Image-Edit-2509
+hf download hanshanxue/WorldStereo --local-dir checkpoints/WorldStereo \
+  --include 'worldstereo-memory-dmd/*'
+hf download Wan-AI/Wan2.1-I2V-14B-720P-Diffusers \
+  --local-dir checkpoints/Wan2.1-I2V-14B-720P-Diffusers
+hf download Ruicheng/moge-2-vitl-normal --local-dir checkpoints/moge-2-vitl-normal
+hf download facebook/sam3 --local-dir checkpoints/sam3
 ```
 
-> **Important:** In multi-GPU mode, the number of input images must be **>= the number of GPUs**. For example, with `--nproc_per_node=8`, provide at least 8 images.
+ZIM and Grounding DINO are resolved through the Hugging Face cache during planning. The SR helper can download Real-ESRGAN x2 weights. WorldStereo defaults to `WORLDSTEREO_LOCAL_FILES_ONLY=1`, so its local directories must be complete; that switch does not make all auxiliary models network-free.
 
-### Gradio App — WorldMirror 2.0
+## Quick start
 
-We provide an interactive [Gradio](https://www.gradio.app/) web demo for WorldMirror 2.0. Upload images or videos and visualize 3DGS, point clouds, depth maps, normal maps, and camera parameters in your browser.
+Run commands from the repository root in the activated environment.
+
+### 1. Configure runtime paths and the VLM
+
+The launchers retain development-machine fallback paths. Override the executables explicitly:
 
 ```bash
-# Single GPU
-python -m hyworld2.worldrecon.gradio_app
+export PYTHON_BIN="$(command -v python)"
+export TORCHRUN_BIN="$(command -v torchrun)"
+export CHECKPOINT_DIR="$PWD/checkpoints"
+export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES_STAGE1=0
 
-# Multi-GPU
-torchrun --nproc_per_node=2 -m hyworld2.worldrecon.gradio_app \
-    --use_fsdp --enable_bf16
+cp .env.example .env.local
 ```
 
-For the full list of Gradio app arguments (port, share, local checkpoints, etc.), see [DOCUMENTATION.md](DOCUMENTATION.md#gradio-app).
+Edit `.env.local`: set `LLM_BASE_URL`, `LLM_NAME`, and `OPENAI_API_KEY` for an image-capable OpenAI-compatible endpoint. The model name must match your endpoint; the template is a placeholder. `LLM_FALLBACK_NAME` is optional. The wrappers load `.env`, then `.env.local`, so file values override exported values. Keep API keys out of commits.
 
+### 2. Generate and inspect the panorama
 
+```bash
+PANO_PROMPT="A quiet campus courtyard with continuous paths and consistent architecture." \
+PANO_SR_BACKEND=realesrgan \
+bash scripts/run_image_to_panorama_sr.sh \
+  /absolute/path/to/input.jpg "$PWD/inference_output/demo"
+```
 
-## 🔮 Performance
+This stops after writing the panorama, SR image, and preview. Inspect layout and content before continuing. The default Qwen output is `1920×960` after edge blending; 2× SR produces `3840×1920`.
 
-For full benchmark results, please refer to the [technical report](https://3d-models.hunyuan.tencent.com/world/).
+Use `PANO_SR_BACKEND=lanczos` for ordinary interpolation without learned SR dependencies. `auto` tries Real-ESRGAN and falls back to Lanczos; the actual backend is recorded in `panorama_sr.png.json`. Choose `realesrgan` explicitly when fallback would invalidate an experiment.
 
-### WorldStereo 2.0 — Camera Control
+### 3. Generate the GS scene
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">Methods</th>
-      <th colspan="3" align="center">Camera Metrics</th>
-      <th colspan="4" align="center">Visual Quality</th>
-    </tr>
-    <tr>
-      <th>RotErr ↓</th><th>TransErr ↓</th><th>ATE ↓</th>
-      <th>Q-Align ↑</th><th>CLIP-IQA+ ↑</th><th>Laion-Aes ↑</th><th>CLIP-I ↑</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td>SEVA</td><td>1.690</td><td>1.578</td><td>2.879</td><td>3.232</td><td>0.479</td><td>4.623</td><td>77.16</td></tr>
-    <tr><td>Gen3C</td><td>0.944</td><td>1.580</td><td>2.789</td><td>3.353</td><td>0.489</td><td>4.863</td><td>82.33</td></tr>
-    <tr><td>WorldStereo</td><td>0.762</td><td>1.245</td><td>2.141</td><td>4.149</td><td><b>0.547</b></td><td>5.257</td><td>89.05</td></tr>
-    <tr><td><b>WorldStereo 2.0</b></td><td><b>0.492</b></td><td><b>0.968</b></td><td><b>1.768</b></td><td><b>4.205</b></td><td>0.544</td><td><b>5.266</b></td><td><b>89.43</b></td></tr>
-  </tbody>
-</table>
+```bash
+bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
+```
 
-### WorldStereo 2.0 — Single-View-Generated Reconstruction
+The launcher prefers `panorama_sr.png` if present, otherwise `panorama.png`. Defaults are all five stages, 10,000 training steps, SH degree 0, and native/Unity GS exports.
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">Methods</th>
-      <th colspan="4">Tanks-and-Temples</th>
-      <th colspan="4">MipNeRF360</th>
-    </tr>
-    <tr>
-      <th>Precision ↑</th>
-      <th>Recall ↑</th>
-      <th>F1-Score ↑</th>
-      <th>AUC ↑</th>
-      <th>Precision ↑</th>
-      <th>Recall ↑</th>
-      <th>F1-Score ↑</th>
-      <th>AUC ↑</th>
-    </tr>
-  </thead>
-  <tbody align="center">
-    <tr>
-      <td align="left">SEVA</td>
-      <td>33.59</td>
-      <td>35.34</td>
-      <td>36.73</td>
-      <td>51.03</td>
-      <td>22.38</td>
-      <td>55.63</td>
-      <td>28.75</td>
-      <td>46.81</td>
-    </tr>
-    <tr>
-      <td align="left">Gen3C</td>
-      <td><u>46.73</u></td>
-      <td>25.51</td>
-      <td>31.24</td>
-      <td>42.44</td>
-      <td>23.28</td>
-      <td><strong>75.37</strong></td>
-      <td>35.26</td>
-      <td>52.10</td>
-    </tr>
-    <tr>
-      <td align="left">Lyra</td>
-      <td><strong>50.38</strong></td>
-      <td>28.67</td>
-      <td>32.54</td>
-      <td>43.05</td>
-      <td>30.02</td>
-      <td>58.60</td>
-      <td>36.05</td>
-      <td>49.89</td>
-    </tr>
-    <tr>
-      <td align="left">FlashWorld</td>
-      <td>26.58</td>
-      <td>20.72</td>
-      <td>22.29</td>
-      <td>30.45</td>
-      <td>35.97</td>
-      <td>53.77</td>
-      <td>42.60</td>
-      <td>53.86</td>
-    </tr>
-    <tr>
-      <td align="left">WorldStereo 2.0</td>
-      <td>43.62</td>
-      <td><u>41.02</u></td>
-      <td><u>41.43</u></td>
-      <td><u>58.19</u></td>
-      <td><strong>43.19</strong></td>
-      <td><u>65.32</u></td>
-      <td><strong>51.27</strong></td>
-      <td><strong>65.79</strong></td>
-    </tr>
-    <tr>
-      <td align="left">WorldStereo 2.0 (DMD)</td>
-      <td>40.41</td>
-      <td><strong>44.41</strong></td>
-      <td><strong>43.16</strong></td>
-      <td><strong>60.09</strong></td>
-      <td><u>42.34</u></td>
-      <td>64.83</td>
-      <td><u>50.52</u></td>
-      <td><u>65.64</u></td>
-    </tr>
-  </tbody>
-</table>
+For an unattended image-to-scene run:
 
-### WorldMirror 2.0 — Point Map Reconstruction
+```bash
+PANO_SR=1 PANO_SR_BACKEND=realesrgan \
+bash scripts/run_image_to_worldgen_2gpu.sh \
+  /absolute/path/to/input.jpg "$PWD/inference_output/demo"
+```
 
-**Point Map Reconstruction on 7-Scenes, NRGBD, and DTU.** We report the mean Accuracy and Completeness of WorldMirror under different input configurations. **Bold** results are best. "L / M / H" denote low / medium / high inference resolution. "+ all priors" denotes injection of camera extrinsics, camera intrinsics, and depth priors.
+For an existing panorama, put it at `inference_output/demo/panorama.png` and run the panorama-to-worldgen wrapper. An SR image is optional and must be generated separately.
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">Method</th>
-      <th colspan="2" align="center">7-Scenes <sub>(scene)</sub></th>
-      <th colspan="2" align="center">NRGBD <sub>(scene)</sub></th>
-      <th colspan="2" align="center">DTU <sub>(object)</sub></th>
-    </tr>
-    <tr>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td colspan="7"><em>WorldMirror 1.0</em></td></tr>
-    <tr><td>&nbsp;&nbsp;L</td><td>0.043</td><td>0.055</td><td>0.046</td><td>0.049</td><td>1.476</td><td>1.768</td></tr>
-    <tr><td>&nbsp;&nbsp;L + all priors</td><td>0.021</td><td>0.026</td><td>0.022</td><td>0.020</td><td>1.347</td><td>1.392</td></tr>
-    <tr><td>&nbsp;&nbsp;M</td><td>0.043</td><td>0.049</td><td>0.041</td><td>0.045</td><td>1.017</td><td>1.780</td></tr>
-    <tr><td>&nbsp;&nbsp;M + all priors</td><td>0.018</td><td>0.023</td><td>0.016</td><td>0.014</td><td>0.735</td><td>0.935</td></tr>
-    <tr><td>&nbsp;&nbsp;H</td><td>0.079</td><td>0.087</td><td>0.077</td><td>0.093</td><td>2.271</td><td>2.113</td></tr>
-    <tr><td>&nbsp;&nbsp;H + all priors</td><td>0.042</td><td>0.041</td><td>0.078</td><td>0.082</td><td>1.773</td><td>1.478</td></tr>
-    <tr><td colspan="7"></td></tr>
-    <tr><td colspan="7"><em>WorldMirror 2.0</em></td></tr>
-    <tr><td>&nbsp;&nbsp;L</td><td>0.041</td><td>0.052</td><td>0.047</td><td>0.058</td><td>1.352</td><td>2.009</td></tr>
-    <tr><td>&nbsp;&nbsp;L + all priors</td><td>0.019</td><td>0.024</td><td>0.017</td><td>0.015</td><td>1.100</td><td>1.201</td></tr>
-    <tr><td>&nbsp;&nbsp;M</td><td>0.033</td><td>0.046</td><td>0.039</td><td>0.047</td><td>1.005</td><td>1.892</td></tr>
-    <tr><td>&nbsp;&nbsp;M + all priors</td><td>0.013</td><td>0.017</td><td><b>0.013</b></td><td><b>0.013</b></td><td>0.690</td><td>0.876</td></tr>
-    <tr><td>&nbsp;&nbsp;H</td><td>0.037</td><td>0.040</td><td>0.046</td><td>0.053</td><td>0.845</td><td>1.904</td></tr>
-    <tr><td>&nbsp;&nbsp;<b>H + all priors</b></td><td><b>0.012</b></td><td><b>0.016</b></td><td>0.015</td><td>0.016</td><td><b>0.554</b></td><td><b>0.771</b></td></tr>
-  </tbody>
-</table>
- 
-### WorldMirror 2.0 — Prior Comparison
+### 4. Select stages or resume optimization
 
-**Comparison with Pow3R and MapAnything under Different Prior Conditions.** Results are averaged on 7-Scenes, NRGBD, and DTU datasets. Pow3R (pro) refers to the original Pow3R with Procrustes alignment.
+```bash
+# Rebuild GS data and train using the existing expansion results.
+STAGES=45 bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
 
+# Resume a compatible training checkpoint to a longer horizon.
+STAGES=5 GS_RESUME_GS_PATH="$PWD/inference_output/demo/gs_result_2gpu/ckpts" \
+GS_RESUME_SOURCE_MAX_STEPS=10000 GS_MAX_STEPS=20000 \
+GS_SAVE_STEPS=20000 GS_EVAL_STEPS=20000 GS_PLY_STEPS=20000 \
+bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
+```
 
-<p align="center">
-  <img src="assets/prior_comparison2_wm2.png" width="85%">
-</p>
+Stage selection does not rebuild missing prerequisites. Resume requires training data and compatible per-rank checkpoints; a final PLY alone is not a training checkpoint. Use `--help` on the image/panorama wrappers for their argument reference.
 
+## Configuration
 
+Common settings for [`run_worldgen_2gpu.sh`](scripts/run_worldgen_2gpu.sh):
 
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `STAGES` | `all` | Select stages, such as `3`, `45`, or `5`. |
+| `WORLDGEN_NPROC_PER_NODE` | `2` | Worker count for stages 2–4; match visible GPUs. |
+| `WORLDSTEREO_CPU_OFFLOAD` | `0` | CPU offload instead of WorldStereo FSDP. |
+| `SPLITTED_RESOLUTION` | `720` | Perspective-view preparation resolution. |
+| `TRAJ_PRESET` | `auto` | `light`, `balanced`, or `full`; auto selects light at resolution ≥720. |
+| `GS_MAX_STEPS` | `10000` | Training horizon; adjust save/eval/PLY steps when changing it. |
+| `GS_SH_DEGREE` | `0` | Spherical harmonics degree. |
+| `GS_DOWNSAMPLE_PTS_NUM` | `2000000` | Initial point budget, not final Gaussian count. |
+| `GS_DEPTH_LAMBDA1` / `GS_LPIPS_LAMBDA1` | `0.1` / `0.2` | Loss weights. |
+| `GS_NORMAL_LOSS` | `1` | Normal supervision. |
+| `GS_USE_MASK_GAUSSIAN` / `GS_USE_SCALE_REGULARIZATION` | `0` / `0` | Optional regularizers. |
+| `GS_EXPORT_UNITY` / `GS_EXPORT_UNITY_SPZ` | `1` / `0` | Unity export and optional SPZ file. |
 
-## 🎬 More Examples
+Override model paths with `PANO_QWEN_MODEL`, `PANO_LORA_PATH`, `WORLDSTEREO_REPO`, `WORLDSTEREO_BASE_MODEL`, `WORLDMIRROR_MODEL`, `MOGE_MODEL`, and `SAM3_MODEL` as needed.
 
-<table align="center" style="border: none;">
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_3.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_4.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_5.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_6.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_9.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_10.gif" width="100%"></td>
-  </tr>
-</table>
+`HY_OFFLINE_VLM=1` bypasses VLM calls using deterministic metadata/object fallbacks. Set `HY_OFFLINE_SCENE_TYPE` and `HY_OFFLINE_OBJECTS` for the scene. This changes planning behavior and does not eliminate model downloads.
 
+## Outputs and viewing
 
-## 📖 Documentation
+Typical image-to-scene output:
 
-For detailed usage guides, parameter references, output format specifications, and prior injection instructions, see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
+```text
+inference_output/demo/
+├── input/
+│   ├── original.jpg                 # Source copy; extension follows input
+│   ├── input_rgb.png                # Oriented RGB working image
+│   └── input_meta.json
+├── panorama.png
+├── panorama_sr.png                  # Optional
+├── panorama_sr.png.json             # SR backend and statistics
+├── panorama_sr_preview.jpg
+├── render_results/                  # Expansion results and camera trajectories
+├── gs_data/                         # RGB, depth, normals, cameras, initial points
+├── gs_result_2gpu/
+│   ├── cfg.yml
+│   ├── ckpts/                       # Training checkpoints
+│   ├── stats/                       # Evaluation records
+│   ├── renders/                     # Validation renders
+│   ├── ply/
+│   │   ├── point_cloud_9999.ply      # Final native GS for 10,000 steps
+│   │   └── position_meta_info.json
+│   └── unity_export/
+│       ├── <asset>_9999_unity_dx12.ply
+│       └── <asset>_9999_unity_dx12.json
+└── run_summary.txt
+```
 
+This tree is illustrative; intermediate/mesh outputs depend on executed stages. The image wrapper writes `run_summary.txt`. Export filenames use zero-based steps, so a 10,000-step run ends at `9999`. Unity asset names are inferred from input metadata or the scene directory.
 
-## 📚 Citation
+### Native scene viewer
 
-If you find HunyuanWorld 2.0 useful for your research, please cite:
+```bash
+python hyworld2/worldgen/show_gs.py \
+  --ckpt "$PWD/inference_output/demo/gs_result_2gpu/ply/point_cloud_9999.ply" \
+  --port 8080
+```
+
+Keep `position_meta_info.json` beside the PLY for this viewer. Rendering a trained scene does not require the large panorama/world-expansion model weights.
+
+### Unity handoff
+
+Use the exported `*_unity_dx12.ply` and paired JSON with a compatible Gaussian Splatting renderer and camera importer. The JSON carries transformed camera poses, field of view, and available trajectories/training views. This repository does not supply the Unity renderer, XR integration, or application controls. Do not combine Unity-transformed cameras with the native-coordinate PLY.
+
+To export an existing trained scene without rerunning optimization:
+
+```bash
+python scripts/export_unity_dx12_from_ply.py \
+  --scene-dir "$PWD/inference_output/demo"
+```
+
+The exporter still uses `gs_data`, configuration, and camera/geometry metadata. Export before deleting training intermediates. Keep both native and Unity assets when both rendering paths are needed.
+
+A compact archive should retain final PLYs, coordinate/camera metadata, original images, prompts, final panorama, configuration, and evaluation records. Also retain training data and checkpoints if optimization will resume. Preview videos and training caches are not the final scene representation.
+
+### Multi-view/video reconstruction
+
+```bash
+INPUT_PATH="$PWD/examples/worldrecon/realistic/Messy_Room" \
+OUTPUT_PATH="$PWD/inference_output/reconstruction_demo" \
+bash scripts/run_worldrecon_2gpu.sh
+```
+
+This wrapper runs WorldMirror with two workers and FSDP. The [worldrecon module](hyworld2/worldrecon) and [inherited CLI reference](DOCUMENTATION.md) cover additional options. The reference describes upstream interfaces; the wrappers/defaults above describe this fork.
+
+## Limitations and troubleshooting
+
+- **Missing executable:** override `PYTHON_BIN` and `TORCHRUN_BIN`; machine-specific fallback paths remain in the launchers.
+- **Out of GPU memory:** try WorldStereo CPU offload, lighter trajectories, or lower view resolution. These affect performance and coverage; single-GPU execution is not a drop-in equivalent of the default route.
+- **Model loading fails:** check model access, local paths, and required subfolders. WorldStereo local-only loading is separate from auxiliary model caches.
+- **Poor geometry:** inspect the panorama, expansion views, and cameras. Higher resolution does not guarantee correct geometry or recover unseen structure.
+- **Cannot resume after cleanup:** retain training data and checkpoints for continued optimization. PLY archives remain renderable.
+- **Unity orientation/framing differs:** use the paired export/cameras, respecting their coordinate system and field of view.
+
+This is a research pipeline. Missing regions, floaters, and generated structures that differ from the input can occur. This fork does not claim a benchmark improvement, exact metric reconstruction, or an automatically deployable VR experience.
+
+## Contributing
+
+Report the commit, GPU/CUDA/PyTorch versions, launch command, relevant non-secret settings, and failing-stage logs. Include a shareable input or small reproduction for scene-specific issues where possible.
+
+Keep changes scoped and describe verification. Distinguish panorama, expansion, training, and export results when reporting pipeline changes. Do not commit credentials, model weights, or generated training datasets.
+
+## Acknowledgments and license
+
+Built on [Tencent HY-World 2.0](https://github.com/Tencent-Hunyuan/HY-World-2.0), including HY-Pano, WorldNav, WorldStereo, and WorldMirror, with dependencies such as gsplat, MoGe, SAM3, Recast Navigation, and optionally Real-ESRGAN. Third-party code, weights, and assets retain their respective licenses.
+
+The inherited project uses the [Tencent HY-WORLD 2.0 Community License Agreement](License.txt), including its use and geographic restrictions. This fork does not replace it with MIT or Apache-2.0. See [NOTICE](NOTICE) for attribution.
+
+For research using the underlying models, cite the upstream work:
 
 ```bibtex
 @article{hyworld22026,
@@ -526,20 +329,4 @@ If you find HunyuanWorld 2.0 useful for your research, please cite:
   journal={arXiv preprint arXiv:2604.14268},
   year={2026}
 }
-
-@article{hunyuanworld2025tencent,
-    title={HunyuanWorld 1.0: Generating Immersive, Explorable, and Interactive 3D Worlds from Words or Pixels},
-    author={Team HunyuanWorld},
-    year={2025},
-    journal={arXiv preprint}
-}
 ```
-
-## 📧 Contact
-
-Please send emails to tengfeiwang12@gmail.com for questions or feedback.
-
-
-## 🙏 Acknowledgements
-
-We would like to thank [HunyuanWorld 1.0](https://github.com/Tencent-Hunyuan/HunyuanWorld-1.0), [WorldMirror](https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror), [WorldPlay](https://github.com/Tencent-Hunyuan/HY-WorldPlay), [WorldStereo](https://github.com/FuchengSu/WorldStereo), [HunyuanImage](https://github.com/Tencent-Hunyuan/HunyuanImage-3.0) for their great work.

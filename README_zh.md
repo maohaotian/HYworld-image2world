@@ -1,525 +1,326 @@
+# HYworld-image2world
 
+**从单张图片生成三维高斯场景，支持分阶段训练与 Unity 资产导出。**
 
-<h1>HY-World 2.0：A Multi-Modal World Model for Reconstructing, Generating, and Simulating 3D Worlds</h1>
+[English](README.md) · [简体中文](README_zh.md) · [上游 HY-World 2.0](https://github.com/Tencent-Hunyuan/HY-World-2.0) · [问题反馈](https://github.com/maohaotian/HYworld-image2world/issues)
 
-[English](README.md) | [简体中文](README_zh.md)
+HYworld-image2world 是基于腾讯 HY-World 2.0 的工程分支，将图像预处理、全景生成、全景超分、世界扩展、Gaussian Splatting 优化与 Unity 导出串成可配置的工作流。你可以先检查全景图，再生成完整场景；也可以复用已有结果，只运行指定阶段，并导出与场景配套的相机。
 
-<p align="center">
-  <img src="assets/teaser.png" width="95%" alt="HY-World-2.0 Teaser">
-</p>
+本项目沿用上游的预训练模型和整体架构，重点是高分辨率输入、生成流程的工程适配，以及向 Unity 交付场景资产。仓库没有发布新的基础模型，也不包含完整的 Unity/VR 应用。
 
-<div align="center">
-  <a href=https://3d.hunyuan.tencent.com/sceneTo3D target="_blank"><img src=https://img.shields.io/badge/Official%20Site-333399.svg?logo=homepage height=22px></a>
-  <a href=https://huggingface.co/tencent/HY-World-2.0 target="_blank"><img src=https://img.shields.io/badge/%F0%9F%A4%97%20Models-d96902.svg height=22px></a>
-  <a href=https://3d-models.hunyuan.tencent.com/world/ target="_blank"><img src= https://img.shields.io/badge/Page-bb8a2e.svg?logo=github height=22px></a>
-  <a href=https://arxiv.org/abs/2604.14268 target="_blank"><img src=https://img.shields.io/badge/Report-b5212f.svg?logo=arxiv height=22px></a>
-   <a href=https://modelscope.cn/models/Tencent-Hunyuan/HY-World-2.0 target="_blank"><img src=https://img.shields.io/badge/ModelScope-Models-624aff.svg height=22px></a>
-  <a href=https://discord.gg/dNBrdrGGMa target="_blank"><img src= https://img.shields.io/badge/Discord-white.svg?logo=discord height=22px></a>
-  <a href=https://x.com/TencentHunyuan target="_blank"><img src=https://img.shields.io/badge/Tencent%20HY-black.svg?logo=x height=22px></a>
- <a href="#community-resources" target="_blank"><img src=https://img.shields.io/badge/Community-lavender.svg?logo=homeassistantcommunitystore height=22px></a>
-</div>
+## 目录
 
-<br>
-<p align="center">
-  <i>"What Is Now Proved Was Once Only Imagined"</i>
-</p>
+- [相对上游的修改](#相对上游的修改)
+- [处理流程](#处理流程)
+- [安装](#安装)
+- [模型权重](#模型权重)
+- [快速开始](#快速开始)
+- [配置](#配置)
+- [输出与查看](#输出与查看)
+- [限制与常见问题](#限制与常见问题)
+- [参与开发](#参与开发)
+- [致谢与许可证](#致谢与许可证)
 
-## 🎥 视频
+## 相对上游的修改
 
-https://github.com/user-attachments/assets/b56f4750-25c9-48fb-83ff-d58526711463
+本分支保留上游模型，主要调整以下实现：
 
-## 🔥 最新动态
+| 范围 | 本仓库的修改 |
+| --- | --- |
+| 流程入口 | 新增单图生成、仅生成全景供检查、从已确认全景继续生成、双卡重建等启动脚本。世界生成支持单独选择阶段。 |
+| 输入与全景 | 保留原始图片；对工作副本处理 EXIF 方向、等比例缩放并记录元数据。新增带水平环绕填充的 2 倍全景放大，保存预览及实际后端、图像统计信息。 |
+| 高分辨率 GS 数据 | 优先使用超分全景。帧分辨率变化时同步缩放相机内参和深度图，对齐天空深度与法线的尺寸，并记录训练帧来源。 |
+| 模型与 VLM 配置 | 支持本地模型路径、显式指定 WorldStereo 基座、仅从本地加载及 CPU offload。支持可配置的 OpenAI 兼容视觉接口、API Key、备用模型和不调用 VLM 的确定性回退。 |
+| GS 优化 | 开放训练步数、SH 阶数、初始点预算、损失权重和训练帧筛选。增加按 rank 加载 checkpoint 的续训与原训练时长处理，修复分布式进程的 bilateral-grid 导入；延长训练时不再同步改变增密频率。 |
+| Unity 导出 | 导出坐标对齐后的 GS PLY 和相机 JSON，收录可用训练视角与生成轨迹；支持可选 SPZ，并提供从已有训练 PLY 导出的独立脚本。 |
 
-- **[2026年5月18日]**：🤗 开源世界生成推理代码和 WorldStereo 2.0 模型权重！
-- **[2026年5月11日]**：🤗 开源 HY-Pano 2.0 推理代码和模型权重！
-- **[2026年4月16日]**：🚀 发布 HY-World 2.0 技术报告及部分代码！
-- **[2026年4月16日]**：🤗 开源 WorldMirror 2.0 推理代码和模型权重！
+主要改动位于 [`scripts/`](scripts/)、[`world_gs_trainer.py`](hyworld2/worldgen/world_gs_trainer.py)、[`gen_gs_data.py`](hyworld2/worldgen/gen_gs_data.py)，以及 worldgen 的相机、VLM 和模型加载工具。这些是工程实现与可配置实验，不代表每个场景的生成质量都优于上游。
 
+## 处理流程
 
-## 📋 目录
-- [📖 介绍](#-介绍)
-- [✨ 亮点](#-亮点)
-- [🧩 架构](#-架构)
-- [📝 开源计划](#-开源计划)
-- [🎁 模型库](#-模型库)
-- [🤗 快速开始](#-快速开始)
-- [🔮 性能表现](#-性能表现)
-- [🎬 更多示例](#-更多示例)
-- [📖 文档](#-文档)
-- [📚 引用](#-引用)
-
-
-## 📖 介绍
-
-**HY-World 2.0** 是一个面向**世界生成**和**世界重建**的多模态世界模型框架。它接受多种输入模态——文本、单视图图像、多视图图像和视频——并生成3D世界表示（网格 / 3D高斯点云）。它提供两大核心能力：
-
-- **世界生成**（文本 / 单张图像 &rarr; 3D 世界）：通过四阶段方法合成高保真、可导航的3D场景——a) ![全景生成](https://img.shields.io/badge/Panorama_Generation-4285F4?style=flat-square)（HY-Pano 2.0），b) ![轨迹规划](https://img.shields.io/badge/Trajectory_Planning-EA4335?style=flat-square)（WorldNav），c) ![世界扩展](https://img.shields.io/badge/World_Expansion-FBBC05?style=flat-square)（WorldStereo 2.0），d) ![世界组合](https://img.shields.io/badge/World_Composition-34A853?style=flat-square)（WorldMirror 2.0 + 3DGS 学习）。
-- **世界重建**（多视图图像 / 视频 &rarr; 3D）：由 WorldMirror 2.0 驱动，这是一个统一的前馈模型，能够在单次前向传播中同时预测深度、表面法线、相机参数、3D点云和3DGS属性。
-
-HY-World 2.0 是**开源的**3D世界模型。我们已经发布模型权重、代码和技术细节，以促进可复现性并推动该领域的研究进展。
-
-### 为什么需要3D世界模型？
-
-现有的世界模型（如 Genie 3、Cosmos、HY-World 1.5（WorldPlay+WorldCompass））生成的是像素级视频——本质上是"看一部电影"，播放结束即消失。**HY-World 2.0 采用了完全不同的方法**：它直接生成可编辑、可持久化的3D资产（网格 / 3DGS），可以直接导入到 Blender/Unity/Unreal Engine/Isaac Sim 等游戏引擎中——更像是"构建一个可玩的游戏"，而非录制一段视频。这种范式转变从根本上解决了视频世界模型的许多长期痛点：
-
-|  | 视频世界模型 | 3D 世界模型（HY-World 2.0） |
-|--|---|---|
-| **输出** | 像素视频（不可编辑） | 真实 3D 资产——网格 / 3DGS（完全可编辑） |
-| **可交互时长** | 有限（通常 1 分钟） | 无限——资产永久保存 |
-| **3D 一致性** | 无保证（闪烁、跨视角伪影） | 原生一致——内在3D一致性 |
-| **实时渲染** | 需要逐帧推理；延迟高 | 消费级 GPU 即可实时渲染 |
-| **可控性** | 弱（角色控制不精确，无真实物理） | 精确——零误差控制、真实物理碰撞、准确光照 |
-| **推理成本** | 随每次交互累积 | 一次生成；渲染成本 ≈ 0 |
-| **引擎兼容性** | ✗ 仅视频文件 | ✓ 可直接导入 Blender / UE / Isaac Engine |
-| | $\color{IndianRed}{\textsf{看完视频，即刻消失}}$ | $\color{RoyalBlue}{\textbf{构建世界，永久保留}}$ |
-
-
-<table align="center" style="border: none;">
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_1.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_2.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_7.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_8.gif" width="100%"></td>
-  </tr>
-</table>
-
-<p align="center"><em>以上均为<strong>真实3D资产</strong>（非生成视频），完全由 HY-World 2.0 创建——截取自实时交互画面。</em></p>
-
-## ✨ 亮点
-
-- **真实3D世界，而非仅仅是视频**
-
-  与纯视频世界模型（如 Genie 3、HY World 1.5）不同，HY-World 2.0 生成**真实3D资产**——3DGS、网格和点云——可自由浏览、编辑，并直接导入 **Unity / Unreal Engine / Isaac**。从一段文本提示或一张图像出发，即可创建多种风格的可导航3D世界：写实、卡通、游戏等。
-
-<p align="center">
-  <img src="assets/mesh.gif" width="95%">
-</p>
-
-
-- **从照片和视频即时3D重建**
-
-  由 **WorldMirror 2.0** 驱动，这是一个统一的前馈模型，能够在单次前向传播中从多视图图像或随手拍摄的视频中预测稠密点云、深度图、表面法线、相机参数和3DGS。支持灵活分辨率推理（50K–500K 像素），精度达到 SOTA 水平。拍摄一段视频，即可获得数字孪生。
-
-<p align="center">
-  <img src="assets/recon.gif" width="95%">
-</p>
-
-- **交互式角色探索**
-
-  不仅仅是观看——**在生成的世界中自由漫游**。HY-World 2.0 支持第一人称导航和第三人称角色模式，用户可以在 AI 生成的街道、建筑和景观中自由探索，并具备基于物理的碰撞效果。前往[我们的产品页面](https://3d.hunyuan.tencent.com/sceneTo3D)免费体验 (![Very Crowded Now](https://img.shields.io/badge/Very_Crowded_Now,_Be_Patient-EA4335?style=flat-square))。
-
-<p align="center">
-  <img src="assets/interactive.gif" width="95%">
-</p>
-
-## 🧩 架构
-- **详细信息请参阅我们的技术报告**
-
-  HY-World 2.0 的系统化流水线——*全景生成*（HY-Pano-2.0）&rarr; *轨迹规划*（WorldNav）&rarr; *世界扩展*（WorldStereo 2.0）&rarr; *世界组合*（WorldMirror 2.0 + Splattings Learning）——能够自动将文本或单张图像转化为高保真、可漫游的3D世界（3DGS/网格输出）。
-
-<p align="center">
-  <img src="assets/overview.png" width="95%">
-</p>
-
-## 📝 开源计划
-
-- [x] 技术报告
-- [x] WorldMirror 2.0 代码和模型权重
-- [x] 世界生成推理代码（WorldNav + WorldStereo 2.0 + 3DGS 组合）
-- [x] 全景生成（HY-Pano 2.0）模型和代码
-- [x] WorldStereo 2.0 模型权重
-
-
-## 🎁 模型库
-
-### 世界重建 — WorldMirror 系列
-
-| 模型 | 描述 | 参数量 | 日期 | Hugging Face |
-|------|------|--------|------|--------------|
-| WorldMirror-2 [new] | 多视图 / 视频 &rarr; 3D 重建 | ~1.2B | 2026 | [下载](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-WorldMirror-2.0) |
-| WorldMirror-1 | 多视图 / 视频 &rarr; 3D 重建（旧版） | ~1.2B | 2025 | [下载](https://huggingface.co/tencent/HunyuanWorld-Mirror/tree/main) |
-
-### 全景生成 — HY-Pano 系列
-
-| 模型 | 描述 | 参数量 | 日期 | Hugging Face |
-|------|------|--------|------|--------------|
-| HY-Pano-2 [new] | 文本 / 图像 &rarr; 360° 全景 | ~80B | 2026 | [下载](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-Pano-2.0) |
-| HY-Pano-2-Qwen [new] | 文本 / 图像 &rarr; 360° 全景 | ~425M | 2026 | [下载](https://huggingface.co/tencent/HY-World-2.0/blob/main/HY-Pano-2.0/pytorch_lora_weights.safetensors) |
-
-### 世界扩展 — WorldStereo 系列
-
-| 模型            | 描述 | 参数量 | 日期 | Hugging Face |
-|-----------------|------|--------|------|--------------|
-| WorldStereo-2 [new] | 全景 &rarr; 3DGS 世界 | ~17B | 2026 | [下载](https://huggingface.co/hanshanxue/WorldStereo/tree/main) |
-
-
-我们建议参考我们之前的工作 [WorldStereo](https://github.com/FuchengSu/WorldStereo) 和 [WorldMirror](https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror)，以了解3D世界生成和重建的背景知识。
-
-## 🤗 快速开始
-
-### 安装依赖
-
-我们建议使用 **CUDA 12.8** 和 **Python 3.11+**。推荐先准备一个共享环境，先满足 **世界重建（WorldMirror 2.0）** 的运行需求，再按需安装 **世界生成** 的额外组件。
-
-#### 1. 创建共享环境
-
-```bash
-git clone https://github.com/Tencent-Hunyuan/HY-World-2.0
-cd HY-World-2.0
-
-conda create -n hyworld2 python=3.11.15
-conda activate hyworld2
+```text
+图片 + 可选提示词
+  → HY-Pano 全景 → 可选的 2 倍全景超分
+  → 轨迹规划与渲染 → WorldStereo 世界扩展
+  → RGB／深度／法线／相机数据准备 → GS 优化
+  → 原生场景 PLY + Unity PLY／相机 JSON
 ```
 
-#### 2. 安装世界重建依赖
+全景生成后，worldgen 启动脚本包含五个阶段：
 
-完成此步骤后，环境即可运行 **worldrecon / WorldMirror 2.0**。
+| 阶段 | 组件 | 作用 |
+| --- | --- | --- |
+| 1 | `traj_generate.py` | 分析全景，规划相机轨迹。 |
+| 2 | `traj_render.py` | 渲染初始轨迹视图，准备描述信息。 |
+| 3 | `video_gen.py` | 使用 WorldStereo 扩展场景。 |
+| 4 | `gen_gs_data.py` | 整理训练视图、深度、法线与相机。 |
+| 5 | `world_gs_trainer.py` | 优化高斯并导出场景资产。 |
 
-```bash
-# worldrecon 和 worldgen 共用的基础依赖
-pip install -r requirements.txt
+上游的多视图／视频重建能力也保留在 [`hyworld2/worldrecon`](hyworld2/worldrecon)，无需先生成全景。
 
-# 推荐：安装一次自定义 gsplat 版本，同时支持 worldrecon 和 worldgen
-cd hyworld2/worldgen/third_party/gsplat_maskgaussian
-pip install -e . --no-build-isolation
-cd ../../../../
-```
+## 安装
 
-如果你只需要 **worldrecon**，并希望使用更简单的妥协安装方式，也可以安装官方 `gsplat`：
+### 环境要求
 
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
-```
+- Linux、Python 3.11、NVIDIA GPU 及兼容的 CUDA 工具链。参考安装目标为 CUDA 12.8。
+- 根目录依赖固定为 PyTorch 2.7.1、torchvision 0.22.1；光栅化与几何扩展需要在匹配的环境中编译。
+- 世界生成的第 2–4 阶段默认启动两个 GPU 进程。完整流程需要较大的显存、内存及磁盘空间；本分支尚未给出经过测量的消费级显卡最低配置。
+- 能访问所需模型仓库；默认规划流程还需要支持图像输入的 VLM 接口。
 
-安装 **一种** FlashAttention 后端：
-
-```bash
-# Hopper GPU 推荐：FlashAttention-3
-git clone https://github.com/Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-python setup.py install
-cd ../../
-rm -rf flash-attention
-```
+### 创建环境并安装扩展
 
 ```bash
-# 更简单的替代方案：FlashAttention-2
-pip install flash-attn --no-build-isolation
-```
+git clone --recurse-submodules https://github.com/maohaotian/HYworld-image2world.git
+cd HYworld-image2world
 
-#### 3. 添加世界生成额外依赖
+conda create -n hyworld python=3.11 -y
+conda activate hyworld
 
-如果需要运行 **worldgen**，请继续执行以下步骤。以下命令假设已经激活上面的 `hyworld2` 环境。
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install --no-build-isolation -r requirements_git.txt
 
-```bash
-# git 依赖需要先安装好 torch/CUDA
-pip install --no-build-isolation -r requirements_git.txt
-
-# recastnavigation 通过 git submodule 管理
 git submodule update --init --recursive
-
-# 用于轨迹规划的 Recast navmesh 扩展
-cd hyworld2/worldgen/third_party/navmesh
-pip install . --no-build-isolation
-cd ../../../../
+python -m pip install -e hyworld2/worldgen/third_party/gsplat_maskgaussian --no-build-isolation
+python -m pip install ./hyworld2/worldgen/third_party/navmesh --no-build-isolation
+python -m pip install flash-attn --no-build-isolation
 ```
 
-**HY-Pano-2** 的安装请参阅 **[hyworld2/panogen/README_zh_CN.md](hyworld2/panogen/README_zh_CN.md)**。
+世界生成训练使用仓库内的定制 `gsplat`；直接换成官方版本并不等价，部分训练选项依赖定制实现。Unity PLY 转换内部也会使用 `spz` 包，即使没有要求保存 SPZ 文件。
 
-### 代码使用 — 全景生成（HY-Pano-2）
-
-完整文档和命令行参考，请参阅 **[hyworld2/panogen/README_zh_CN.md](hyworld2/panogen/README_zh_CN.md)**。
-
-我们为 HY-Pano 2.0 提供类似 `diffusers` 的 Python API。模型权重将在首次运行时自动从 Hugging Face 下载。
-
-```python
-from pipeline import HunyuanPanoPipeline
-
-pipeline = HunyuanPanoPipeline.from_pretrained('tencent/HY-World-2.0')
-output = pipeline('input.png')
-output.save('output_panorama.png')
-```
-
-### 代码使用 — 世界生成（WorldNav、WorldStereo-2 和 3DGS）
-
-世界生成流程会将全景场景转换为可导航的 3D 世界，主要包含五个阶段：
-
-| 阶段 | 脚本 | 说明 |
-|------|------|------|
-| 1. 轨迹规划 | `traj_generate.py` | 基于 VLM 的相机轨迹规划，支持障碍物感知导航 |
-| 2. 轨迹渲染 | `traj_render.py` | 沿规划轨迹进行多卡点云渲染 |
-| 3. 世界扩展 | `video_gen.py` | 使用 WorldStereo-2 进行带记忆一致性的关键帧生成 |
-| 4. GS 数据准备 | `gen_gs_data.py` | 提取用于 3DGS 训练的图像、对齐深度、法线和相机参数 |
-| 5. 3DGS 训练 | `world_gs_trainer.py` | 优化并导出最终的 Gaussian Splatting 世界 |
-
-如果需要运行“单图 + 文本提示 + 全景超分 + 3D 世界生成”的路径，建议拆成两步执行，先检查全景图是否正确，再继续后续 worldgen 和 GS 训练。第一步生成 `panorama.png`、`panorama_sr.png` 和 `panorama_sr_preview.jpg` 后停止；确认全景图方向和内容没问题后，再用第二步继续执行 worldgen 1-5 阶段。只要 `panorama_sr.png` 存在，`scripts/run_worldgen_2gpu.sh` 会自动优先使用它进行轨迹生成和 GS 数据准备。
+如需学习式全景超分，安装可选依赖：
 
 ```bash
-PANO_PROMPT="a realistic indoor living room with warm lighting" \
-  scripts/run_image_to_panorama_sr.sh /path/to/input_image.jpg /path/to/output_case_dir
-
-# 先检查 /path/to/output_case_dir/panorama_sr_preview.jpg，再继续。
-
-CUDA_VISIBLE_DEVICES=0,1 \
-  scripts/run_panorama_to_worldgen_2gpu.sh /path/to/output_case_dir
+python -m pip install realesrgan basicsr
 ```
 
-常用可选参数包括 `PANO_BACKEND=qwen|hunyuan`、`PANO_SR_BACKEND=auto|realesrgan|lanczos`、`PANO_SR_MODEL_PATH=/path/to/RealESRGAN_x2plus.pth`。原来的一步式封装仍然保留为 `scripts/run_image_to_worldgen_2gpu.sh`。
+其他全景后端见[全景模块文档](hyworld2/panogen/README_zh_CN.md)。该模块的独立 requirements 与根目录使用不同的 NumPy／Transformers 版本，不要未经处理直接覆盖安装到同一环境。
 
-完整文档、运行前置条件和命令行参数，请参阅 **[hyworld2/worldgen/README.md](hyworld2/worldgen/README.md)**。
+## 模型权重
 
-### 代码使用 — WorldMirror 2.0
-WorldMirror 2.0 支持以下使用方式：
+本源码仓库不随附模型权重和生成场景。默认 Qwen 全景路线期望以下目录结构：
 
-- [代码使用](#代码使用--worldmirror-20)
-- [Gradio 应用](#gradio-应用--worldmirror-20)
-
-我们提供了类似 `diffusers` 的 Python API。模型权重将在首次运行时自动从 Hugging Face 下载。
-
-```python
-from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
-
-pipeline = WorldMirrorPipeline.from_pretrained('tencent/HY-World-2.0')
-result = pipeline('path/to/images')
+```text
+checkpoints/
+├── HY-World-2.0/
+│   ├── HY-Pano-2.0/
+│   └── HY-WorldMirror-2.0/
+├── Qwen-Image-Edit-2509/
+├── WorldStereo/
+│   └── worldstereo-memory-dmd/
+├── Wan2.1-I2V-14B-720P-Diffusers/
+├── moge-2-vitl-normal/
+│   └── model.pt
+└── sam3/
 ```
 
-**使用先验注入（相机位姿和深度）：**
+| 组件 | 来源 |
+| --- | --- |
+| HY-Pano 适配权重、WorldMirror | [tencent/HY-World-2.0](https://huggingface.co/tencent/HY-World-2.0) |
+| Qwen 全景基座 | [Qwen/Qwen-Image-Edit-2509](https://huggingface.co/Qwen/Qwen-Image-Edit-2509) |
+| WorldStereo | [hanshanxue/WorldStereo](https://huggingface.co/hanshanxue/WorldStereo) |
+| WorldStereo 基座 | [Wan-AI/Wan2.1-I2V-14B-720P-Diffusers](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-720P-Diffusers) |
+| 深度与法线 | [Ruicheng/moge-2-vitl-normal](https://huggingface.co/Ruicheng/moge-2-vitl-normal) |
+| 分割 | [facebook/sam3](https://huggingface.co/facebook/sam3) |
 
-```python
-result = pipeline(
-    'path/to/images',
-    prior_cam_path='path/to/prior_camera.json',
-    prior_depth_path='path/to/prior_depth/',
-)
-```
-
-> 关于相机/深度先验的详细格式和准备方法，请参阅[先验准备指南](DOCUMENTATION_zh.md#先验注入)。
-
-**命令行：**
+安装 Hugging Face CLI、获得相关模型访问权限后，可按以下方式下载：
 
 ```bash
-# 单卡推理
-python -m hyworld2.worldrecon.pipeline --input_path path/to/images
-
-# 多卡推理
-torchrun --nproc_per_node=2 -m hyworld2.worldrecon.pipeline \
-    --input_path path/to/images \
-    --use_fsdp --enable_bf16
+hf download tencent/HY-World-2.0 --local-dir checkpoints/HY-World-2.0 \
+  --include 'HY-Pano-2.0/*' 'HY-WorldMirror-2.0/*'
+hf download Qwen/Qwen-Image-Edit-2509 --local-dir checkpoints/Qwen-Image-Edit-2509
+hf download hanshanxue/WorldStereo --local-dir checkpoints/WorldStereo \
+  --include 'worldstereo-memory-dmd/*'
+hf download Wan-AI/Wan2.1-I2V-14B-720P-Diffusers \
+  --local-dir checkpoints/Wan2.1-I2V-14B-720P-Diffusers
+hf download Ruicheng/moge-2-vitl-normal --local-dir checkpoints/moge-2-vitl-normal
+hf download facebook/sam3 --local-dir checkpoints/sam3
 ```
 
-> **重要提示：** 在多卡模式下，输入图像数量必须 **>= GPU 数量**。例如，使用 `--nproc_per_node=8` 时，需要提供至少 8 张图像。
+规划阶段还会通过 Hugging Face 缓存查找 ZIM 和 Grounding DINO，超分工具可下载 Real-ESRGAN x2 权重。WorldStereo 默认 `WORLDSTEREO_LOCAL_FILES_ONLY=1`，其本地模型目录需要完整；这个开关不代表所有辅助模型都能完全离线运行。
 
-### Gradio 应用 — WorldMirror 2.0
+## 快速开始
 
-我们提供了一个交互式 [Gradio](https://www.gradio.app/) Web 演示。上传图像或视频，即可在浏览器中可视化 3DGS、点云、深度图、法线图和相机参数。
+以下命令均在仓库根目录、已激活的环境中执行。
+
+### 1. 配置运行路径与 VLM
+
+当前启动脚本仍有开发机环境路径作为默认值。在自己的机器上显式指定解释器：
 
 ```bash
-# 单卡
-python -m hyworld2.worldrecon.gradio_app
+export PYTHON_BIN="$(command -v python)"
+export TORCHRUN_BIN="$(command -v torchrun)"
+export CHECKPOINT_DIR="$PWD/checkpoints"
+export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES_STAGE1=0
 
-# 多卡
-torchrun --nproc_per_node=2 -m hyworld2.worldrecon.gradio_app \
-    --use_fsdp --enable_bf16
+cp .env.example .env.local
 ```
 
-关于 Gradio 应用的完整参数列表（端口、分享、本地检查点等），请参阅 [DOCUMENTATION_zh.md](DOCUMENTATION_zh.md#gradio-应用)。
+编辑 `.env.local`，为支持图片输入的 OpenAI 兼容服务填写 `LLM_BASE_URL`、`LLM_NAME` 和 `OPENAI_API_KEY`。模型名必须与服务端一致，模板中的值仅为占位。可选配置 `LLM_FALLBACK_NAME`。脚本依次加载 `.env`、`.env.local`，文件中的值会覆盖先前导出的同名变量。不要提交 API Key。
 
+### 2. 生成并检查全景
 
+```bash
+PANO_PROMPT="安静的校园庭院，道路连续，建筑风格一致。" \
+PANO_SR_BACKEND=realesrgan \
+bash scripts/run_image_to_panorama_sr.sh \
+  /absolute/path/to/input.jpg "$PWD/inference_output/demo"
+```
 
-## 🔮 性能表现
+此命令生成基础全景、超分图和预览后停止。先检查空间布局与内容，再继续生成。默认 Qwen 后端经过边缘混合后的全景为 `1920×960`，2 倍超分后为 `3840×1920`。
 
-完整的基准测试结果请参阅[技术报告](https://3d-models.hunyuan.tencent.com/world/)。
+`PANO_SR_BACKEND=lanczos` 使用普通插值，不依赖学习式超分组件。`auto` 会先尝试 Real-ESRGAN，失败时回退到 Lanczos，实际后端写入 `panorama_sr.png.json`。实验中若不接受静默回退，请显式使用 `realesrgan`。
 
-### WorldStereo 2.0 — 相机控制
+### 3. 生成 GS 场景
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">方法</th>
-      <th colspan="3" align="center">相机指标</th>
-      <th colspan="4" align="center">视觉质量</th>
-    </tr>
-    <tr>
-      <th>RotErr ↓</th><th>TransErr ↓</th><th>ATE ↓</th>
-      <th>Q-Align ↑</th><th>CLIP-IQA+ ↑</th><th>Laion-Aes ↑</th><th>CLIP-I ↑</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td>SEVA</td><td>1.690</td><td>1.578</td><td>2.879</td><td>3.232</td><td>0.479</td><td>4.623</td><td>77.16</td></tr>
-    <tr><td>Gen3C</td><td>0.944</td><td>1.580</td><td>2.789</td><td>3.353</td><td>0.489</td><td>4.863</td><td>82.33</td></tr>
-    <tr><td>WorldStereo</td><td>0.762</td><td>1.245</td><td>2.141</td><td>4.149</td><td><b>0.547</b></td><td>5.257</td><td>89.05</td></tr>
-    <tr><td><b>WorldStereo 2.0</b></td><td><b>0.492</b></td><td><b>0.968</b></td><td><b>1.768</b></td><td><b>4.205</b></td><td>0.544</td><td><b>5.266</b></td><td><b>89.43</b></td></tr>
-  </tbody>
-</table>
+```bash
+bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
+```
 
-### WorldStereo 2.0 — 基于单帧输入的生成式重建
+脚本优先使用已有的 `panorama_sr.png`，否则使用 `panorama.png`。默认运行全部五个阶段，训练 10,000 步、SH 阶数为 0，并导出原生与 Unity GS。
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">Methods</th>
-      <th colspan="4">Tanks-and-Temples</th>
-      <th colspan="4">MipNeRF360</th>
-    </tr>
-    <tr>
-      <th>Precision ↑</th>
-      <th>Recall ↑</th>
-      <th>F1-Score ↑</th>
-      <th>AUC ↑</th>
-      <th>Precision ↑</th>
-      <th>Recall ↑</th>
-      <th>F1-Score ↑</th>
-      <th>AUC ↑</th>
-    </tr>
-  </thead>
-  <tbody align="center">
-    <tr>
-      <td align="left">SEVA</td>
-      <td>33.59</td>
-      <td>35.34</td>
-      <td>36.73</td>
-      <td>51.03</td>
-      <td>22.38</td>
-      <td>55.63</td>
-      <td>28.75</td>
-      <td>46.81</td>
-    </tr>
-    <tr>
-      <td align="left">Gen3C</td>
-      <td><u>46.73</u></td>
-      <td>25.51</td>
-      <td>31.24</td>
-      <td>42.44</td>
-      <td>23.28</td>
-      <td><strong>75.37</strong></td>
-      <td>35.26</td>
-      <td>52.10</td>
-    </tr>
-    <tr>
-      <td align="left">Lyra</td>
-      <td><strong>50.38</strong></td>
-      <td>28.67</td>
-      <td>32.54</td>
-      <td>43.05</td>
-      <td>30.02</td>
-      <td>58.60</td>
-      <td>36.05</td>
-      <td>49.89</td>
-    </tr>
-    <tr>
-      <td align="left">FlashWorld</td>
-      <td>26.58</td>
-      <td>20.72</td>
-      <td>22.29</td>
-      <td>30.45</td>
-      <td>35.97</td>
-      <td>53.77</td>
-      <td>42.60</td>
-      <td>53.86</td>
-    </tr>
-    <tr>
-      <td align="left">WorldStereo 2.0</td>
-      <td>43.62</td>
-      <td><u>41.02</u></td>
-      <td><u>41.43</u></td>
-      <td><u>58.19</u></td>
-      <td><strong>43.19</strong></td>
-      <td><u>65.32</u></td>
-      <td><strong>51.27</strong></td>
-      <td><strong>65.79</strong></td>
-    </tr>
-    <tr>
-      <td align="left">WorldStereo 2.0 (DMD)</td>
-      <td>40.41</td>
-      <td><strong>44.41</strong></td>
-      <td><strong>43.16</strong></td>
-      <td><strong>60.09</strong></td>
-      <td><u>42.34</u></td>
-      <td>64.83</td>
-      <td><u>50.52</u></td>
-      <td><u>65.64</u></td>
-    </tr>
-  </tbody>
-</table>
+如需从图片自动运行到最终场景：
 
+```bash
+PANO_SR=1 PANO_SR_BACKEND=realesrgan \
+bash scripts/run_image_to_worldgen_2gpu.sh \
+  /absolute/path/to/input.jpg "$PWD/inference_output/demo"
+```
 
-### WorldMirror 2.0 — 点云重建
+如果已有全景，将其放在 `inference_output/demo/panorama.png`，直接运行全景到 worldgen 的入口即可。超分图是可选项，需要单独生成。
 
-**在 7-Scenes、NRGBD 和 DTU 上的点图重建。** 我们报告了 WorldMirror 在不同输入配置下的平均精度和完整度。**加粗**为最优结果。"L / M / H" 分别代表低 / 中 / 高推理分辨率。"+ all priors" 表示同时注入相机外参、相机内参和深度先验。
+### 4. 选择阶段或继续训练
 
-<table>
-  <thead>
-    <tr>
-      <th rowspan="2">方法</th>
-      <th colspan="2" align="center">7-Scenes <sub>(场景)</sub></th>
-      <th colspan="2" align="center">NRGBD <sub>(场景)</sub></th>
-      <th colspan="2" align="center">DTU <sub>(物体)</sub></th>
-    </tr>
-    <tr>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-      <th>Acc. ↓</th><th>Comp. ↓</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr><td colspan="7"><em>WorldMirror 1.0</em></td></tr>
-    <tr><td>&nbsp;&nbsp;L</td><td>0.043</td><td>0.055</td><td>0.046</td><td>0.049</td><td>1.476</td><td>1.768</td></tr>
-    <tr><td>&nbsp;&nbsp;L + all priors</td><td>0.021</td><td>0.026</td><td>0.022</td><td>0.020</td><td>1.347</td><td>1.392</td></tr>
-    <tr><td>&nbsp;&nbsp;M</td><td>0.043</td><td>0.049</td><td>0.041</td><td>0.045</td><td>1.017</td><td>1.780</td></tr>
-    <tr><td>&nbsp;&nbsp;M + all priors</td><td>0.018</td><td>0.023</td><td>0.016</td><td>0.014</td><td>0.735</td><td>0.935</td></tr>
-    <tr><td>&nbsp;&nbsp;H</td><td>0.079</td><td>0.087</td><td>0.077</td><td>0.093</td><td>2.271</td><td>2.113</td></tr>
-    <tr><td>&nbsp;&nbsp;H + all priors</td><td>0.042</td><td>0.041</td><td>0.078</td><td>0.082</td><td>1.773</td><td>1.478</td></tr>
-    <tr><td colspan="7"></td></tr>
-    <tr><td colspan="7"><em>WorldMirror 2.0</em></td></tr>
-    <tr><td>&nbsp;&nbsp;L</td><td>0.041</td><td>0.052</td><td>0.047</td><td>0.058</td><td>1.352</td><td>2.009</td></tr>
-    <tr><td>&nbsp;&nbsp;L + all priors</td><td>0.019</td><td>0.024</td><td>0.017</td><td>0.015</td><td>1.100</td><td>1.201</td></tr>
-    <tr><td>&nbsp;&nbsp;M</td><td>0.033</td><td>0.046</td><td>0.039</td><td>0.047</td><td>1.005</td><td>1.892</td></tr>
-    <tr><td>&nbsp;&nbsp;M + all priors</td><td>0.013</td><td>0.017</td><td><b>0.013</b></td><td><b>0.013</b></td><td>0.690</td><td>0.876</td></tr>
-    <tr><td>&nbsp;&nbsp;H</td><td>0.037</td><td>0.040</td><td>0.046</td><td>0.053</td><td>0.845</td><td>1.904</td></tr>
-    <tr><td>&nbsp;&nbsp;<b>H + all priors</b></td><td><b>0.012</b></td><td><b>0.016</b></td><td>0.015</td><td>0.016</td><td><b>0.554</b></td><td><b>0.771</b></td></tr>
-  </tbody>
-</table>
- 
-### WorldMirror 2.0 — 先验对比
+```bash
+# 保留已有世界扩展结果，重新准备 GS 数据并训练。
+STAGES=45 bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
 
-**WorldMirror 与 Pow3R、MapAnything 在不同先验条件下的对比。** 结果为 7-Scenes、NRGBD 和 DTU 数据集上的平均值。Pow3R (pro) 指使用 Procrustes 对齐的原版 Pow3R。
+# 从兼容的训练 checkpoint 继续到更长的训练时长。
+STAGES=5 GS_RESUME_GS_PATH="$PWD/inference_output/demo/gs_result_2gpu/ckpts" \
+GS_RESUME_SOURCE_MAX_STEPS=10000 GS_MAX_STEPS=20000 \
+GS_SAVE_STEPS=20000 GS_EVAL_STEPS=20000 GS_PLY_STEPS=20000 \
+bash scripts/run_panorama_to_worldgen_2gpu.sh "$PWD/inference_output/demo"
+```
 
+阶段选择不会自动补回缺失的前置产物。续训需要训练数据和兼容的各 rank checkpoint；最终 PLY 本身不能替代训练 checkpoint。图像／全景入口可通过 `--help` 查看参数说明。
 
-<p align="center">
-  <img src="assets/prior_comparison2_wm2.png" width="85%">
-</p>
+## 配置
 
+[`run_worldgen_2gpu.sh`](scripts/run_worldgen_2gpu.sh) 的常用环境变量：
 
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `STAGES` | `all` | 选择阶段，如 `3`、`45` 或 `5`。 |
+| `WORLDGEN_NPROC_PER_NODE` | `2` | 第 2–4 阶段的进程数，应与可见 GPU 匹配。 |
+| `WORLDSTEREO_CPU_OFFLOAD` | `0` | 使用 CPU offload 替代 WorldStereo 默认 FSDP 路线。 |
+| `SPLITTED_RESOLUTION` | `720` | 透视视图准备分辨率。 |
+| `TRAJ_PRESET` | `auto` | `light`、`balanced`、`full`；分辨率 ≥720 时 auto 选择 light。 |
+| `GS_MAX_STEPS` | `10000` | 训练时长；修改时同步设置保存、评估及 PLY 导出步数。 |
+| `GS_SH_DEGREE` | `0` | 球谐阶数。 |
+| `GS_DOWNSAMPLE_PTS_NUM` | `2000000` | 初始点预算，不是最终高斯数量。 |
+| `GS_DEPTH_LAMBDA1` / `GS_LPIPS_LAMBDA1` | `0.1` / `0.2` | 损失权重。 |
+| `GS_NORMAL_LOSS` | `1` | 法线监督。 |
+| `GS_USE_MASK_GAUSSIAN` / `GS_USE_SCALE_REGULARIZATION` | `0` / `0` | 可选正则项。 |
+| `GS_EXPORT_UNITY` / `GS_EXPORT_UNITY_SPZ` | `1` / `0` | Unity 导出及可选 SPZ 文件。 |
 
+模型路径可通过 `PANO_QWEN_MODEL`、`PANO_LORA_PATH`、`WORLDSTEREO_REPO`、`WORLDSTEREO_BASE_MODEL`、`WORLDMIRROR_MODEL`、`MOGE_MODEL`、`SAM3_MODEL` 覆盖。
 
-## 🎬 更多示例
+`HY_OFFLINE_VLM=1` 使用确定性的元数据／对象回退，跳过 VLM 调用。可为场景设置 `HY_OFFLINE_SCENE_TYPE` 和 `HY_OFFLINE_OBJECTS`。该模式会改变规划行为，也不会免除模型下载要求。
 
-<table align="center" style="border: none;">
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_3.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_4.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_5.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_6.gif" width="100%"></td>
-  </tr>
-  <tr>
-    <td align="center" width="50%"><img src="assets/screenshot_9.gif" width="100%"></td>
-    <td align="center" width="50%"><img src="assets/screenshot_10.gif" width="100%"></td>
-  </tr>
-</table>
+## 输出与查看
 
+一次图片到场景的运行通常产生：
 
-## 📖 文档
+```text
+inference_output/demo/
+├── input/
+│   ├── original.jpg                 # 原始输入副本，扩展名随输入而定
+│   ├── input_rgb.png                # 处理方向与色彩格式后的工作图
+│   └── input_meta.json
+├── panorama.png
+├── panorama_sr.png                  # 可选
+├── panorama_sr.png.json             # 超分后端及统计信息
+├── panorama_sr_preview.jpg
+├── render_results/                  # 扩展结果与相机轨迹
+├── gs_data/                         # RGB、深度、法线、相机及初始点
+├── gs_result_2gpu/
+│   ├── cfg.yml
+│   ├── ckpts/                       # 训练 checkpoint
+│   ├── stats/                       # 评估记录
+│   ├── renders/                     # 验证渲染
+│   ├── ply/
+│   │   ├── point_cloud_9999.ply      # 10,000 步训练后的原生 GS
+│   │   └── position_meta_info.json
+│   └── unity_export/
+│       ├── <asset>_9999_unity_dx12.ply
+│       └── <asset>_9999_unity_dx12.json
+└── run_summary.txt
+```
 
-详细的使用指南、参数参考、输出格式说明和先验注入说明，请参阅 **[DOCUMENTATION_zh.md](DOCUMENTATION_zh.md)**。
+以上为目录示意，中间文件和 mesh 产物随实际执行阶段变化。`run_summary.txt` 由图片入口写入。导出文件名使用从 0 开始的步数，因此 10,000 步训练对应 `9999`。Unity 资产名称由输入元数据或场景目录推导。
 
+### 查看原生 GS
 
-## 📚 引用
+```bash
+python hyworld2/worldgen/show_gs.py \
+  --ckpt "$PWD/inference_output/demo/gs_result_2gpu/ply/point_cloud_9999.ply" \
+  --port 8080
+```
 
-如果您觉得 HunyuanWorld 2.0 对您的研究有帮助，请引用：
+这个查看器需要 PLY 旁的 `position_meta_info.json`。已有场景的渲染无需保留大体积的全景／世界扩展模型权重。
+
+### 交付给 Unity
+
+在兼容的 Gaussian Splatting 渲染器和相机导入器中，配套使用 `*_unity_dx12.ply` 与对应 JSON。JSON 包含坐标变换后的相机位姿、视场角及可用的轨迹／训练视角。本仓库不提供 Unity 渲染器、XR 集成或应用交互逻辑。不要将 Unity 坐标系相机与原生坐标系 PLY 混用。
+
+已有训练场景可单独重新导出，无需再次优化：
+
+```bash
+python scripts/export_unity_dx12_from_ply.py \
+  --scene-dir "$PWD/inference_output/demo"
+```
+
+此脚本仍会读取 `gs_data`、配置以及相机／几何元数据，应在清理训练中间产物前完成导出。如果两种渲染路径都要使用，请同时保留原生与 Unity 资产。
+
+精简归档应保留最终 PLY、坐标／相机元数据、原始图片、提示词、最终全景、配置和评估记录。若要续训，还需保留训练数据和 checkpoint；预览视频和训练缓存不是最终场景本体。
+
+### 多视图／视频重建
+
+```bash
+INPUT_PATH="$PWD/examples/worldrecon/realistic/Messy_Room" \
+OUTPUT_PATH="$PWD/inference_output/reconstruction_demo" \
+bash scripts/run_worldrecon_2gpu.sh
+```
+
+此入口使用两个 worker 与 WorldMirror FSDP。更多选项见 [worldrecon 模块](hyworld2/worldrecon)和[继承的 CLI 参考](DOCUMENTATION_zh.md)。参考手册主要描述上游接口，本 README 中的入口与默认值以本分支为准。
+
+## 限制与常见问题
+
+- **找不到解释器：** 显式设置 `PYTHON_BIN`、`TORCHRUN_BIN`；启动脚本仍保留开发机路径作为回退值。
+- **显存不足：** 可尝试 WorldStereo CPU offload、较轻的轨迹预设或较低视图分辨率。这些设置会影响性能与覆盖范围，单卡运行也不等价于默认配置。
+- **模型加载失败：** 检查访问权限、本地路径及模型子目录完整性。WorldStereo 的 local-only 开关与辅助模型的缓存相互独立。
+- **几何质量不理想：** 先检查全景，再检查扩展视图与相机。提高分辨率不保证几何正确，也不能恢复输入中不可见的真实结构。
+- **清理后无法续训：** 需要继续优化的场景应保留训练数据和 checkpoint；仅归档 PLY 仍可用于渲染。
+- **Unity 朝向或构图不同：** 使用配套导出与相机，检查坐标系和视场角，避免混用不同空间的资产。
+
+这是研究型生成流程，结果可能有空洞、漂浮高斯，以及与输入不同的生成结构。本分支不承诺基准性能提升、精确度量重建，或自动交付可部署的 VR 应用。
+
+## 参与开发
+
+反馈问题时，请提供 commit、GPU／CUDA／PyTorch 版本、启动命令、不含密钥的相关配置，以及失败阶段的日志。涉及特定场景时，尽可能提供可公开的输入或最小复现。
+
+提交应保持范围明确并说明验证方式。修改流程时，区分全景、扩展、训练和导出的结果，便于复现受影响阶段。请勿提交凭据、模型权重及生成的训练数据集。
+
+## 致谢与许可证
+
+本项目基于 [Tencent HY-World 2.0](https://github.com/Tencent-Hunyuan/HY-World-2.0)，沿用 HY-Pano、WorldNav、WorldStereo、WorldMirror，并依赖 gsplat、MoGe、SAM3、Recast Navigation 及可选的 Real-ESRGAN 等项目。第三方代码、权重和资产分别遵循各自许可证。
+
+继承项目适用 [Tencent HY-WORLD 2.0 Community License Agreement](License.txt)，包括其中的用途与地域限制。本分支没有将其替换为 MIT 或 Apache-2.0。上游归属声明见 [NOTICE](NOTICE)。
+
+研究中使用底层模型时，请引用上游工作：
 
 ```bibtex
 @article{hyworld22026,
@@ -528,21 +329,4 @@ torchrun --nproc_per_node=2 -m hyworld2.worldrecon.gradio_app \
   journal={arXiv preprint arXiv:2604.14268},
   year={2026}
 }
-
-@article{hunyuanworld2025tencent,
-    title={HunyuanWorld 1.0: Generating Immersive, Explorable, and Interactive 3D Worlds from Words or Pixels},
-    author={Team HunyuanWorld},
-    year={2025},
-    journal={arXiv preprint}
-}
 ```
-
-
-## 📧 联系方式
-
-如有任何问题或反馈，请发送邮件至 tengfeiwang12@gmail.com。
-
-
-## 🙏 致谢
-
-我们衷心感谢 [HunyuanWorld 1.0](https://github.com/Tencent-Hunyuan/HunyuanWorld-1.0)、[WorldMirror](https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror)、[WorldPlay](https://github.com/Tencent-Hunyuan/HY-WorldPlay)、[WorldStereo](https://github.com/FuchengSu/WorldStereo)、[HunyuanImage](https://github.com/Tencent-Hunyuan/HunyuanImage-3.0) 的杰出工作。
